@@ -861,7 +861,7 @@ async function generateScene() {
     log(`Downloaded ${(blob.size / 1024 / 1024).toFixed(2)} MB`, 'ok');
 
     progressFill.style.width = '100%';
-    progressLbl.textContent = 'Model downloaded. Click View Model to open it.';
+    progressLbl.textContent = 'Opening model in viewer…';
 
     latestPlyBlob = blob;
     plyReady = true;
@@ -875,14 +875,12 @@ async function generateScene() {
       a.click();
     };
 
-    // Setup view button: open the generated .ply in the right-side viewer on demand.
+    // Keep View Model as a manual reload button, but also open automatically now.
     btnViewModel.style.display = 'block';
     btnViewModel.onclick = viewLatestModel;
 
-    setStatus('online', 'READY');
-    overlayText.textContent = 'Model is ready.\nClick View Model to open it here.';
-    progressWrap.style.display = 'none';
-    log('✓ Scene ready. Click View Model to preview.', 'ok');
+    log('✓ Scene ready. Opening model automatically…', 'ok');
+    await viewLatestModel({ auto: true });
 
   } catch (e) {
     log(`Error: ${e.message}`, 'err');
@@ -894,7 +892,7 @@ async function generateScene() {
   }
 }
 
-async function viewLatestModel() {
+async function viewLatestModel(options = {}) {
   const base = serverUrlEl.value.trim().replace(/\/$/, '');
 
   try {
@@ -929,7 +927,7 @@ async function viewLatestModel() {
     overlayEl.style.display = 'none';
     vcControls.style.display = 'flex';
     setStatus('online', 'READY');
-    log('✓ Model opened in viewer.', 'ok');
+    log(options.auto ? '✓ Model opened automatically in viewer.' : '✓ Model opened in viewer.', 'ok');
   } catch (e) {
     log(`View failed: ${e.message}`, 'err');
     overlayText.textContent = 'Failed to open model.\nSee log for details.';
@@ -1029,8 +1027,13 @@ async function loadPlyIntoViewer(buffer) {
 
   // Normalise scale
   const r = geo.boundingSphere.radius;
+
+  // Make sure the generated scene is not clipped by the camera frustum.
+  camera.near = Math.max(r * 0.001, 0.001);
+  camera.far = Math.max(r * 20, 1000);
+  camera.updateProjectionMatrix();
   const mat = new THREE.PointsMaterial({
-    size: r * 0.006,
+    size: Math.max(r * 0.006, 0.01),
     vertexColors: colors.length > 0,
     color: colors.length === 0 ? 0x00e5ff : 0xffffff,
     sizeAttenuation: true,
