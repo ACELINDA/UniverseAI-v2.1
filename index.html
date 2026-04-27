@@ -433,6 +433,27 @@
       line-height: 1.7;
     }
 
+
+    /* ── Local 3DGS Drag & Drop ── */
+    #drop-hint {
+      position: absolute;
+      inset: 18px;
+      border: 1px dashed rgba(0,229,255,.55);
+      border-radius: var(--r);
+      background: rgba(0, 229, 255, .055);
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: .78rem;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      line-height: 1.7;
+      pointer-events: none;
+      backdrop-filter: blur(4px);
+    }
+    #viewport.drag-over #drop-hint { display: flex; }
+
     /* Progress bar */
     #progress-wrap {
       width: 220px;
@@ -544,7 +565,8 @@
     }
     #canvas-3d { position: relative; z-index: 1; }
     #overlay    { z-index: 2; }
-    #viewport-controls { z-index: 3; }
+    #drop-hint  { z-index: 3; }
+    #viewport-controls { z-index: 4; }
   </style>
 </head>
 <body>
@@ -659,6 +681,10 @@
       </div>
     </div>
 
+    <div id="drop-hint">
+      Drop local 3DGS model here<br />Supports .ply / .splat / .ksplat
+    </div>
+
     <div id="viewport-controls" style="display:none;">
       <div id="camera-panel">
         <div class="camera-row">
@@ -697,6 +723,7 @@ let currentMode   = 'text';    // 'text' | 'image' | 'pano'
 let selectedFile  = null;
 let plyReady      = false;
 let latestPlyDownloadUrl = null;
+let currentLocalModelUrl = null;
 let splatRenderer = null;
 
 // ============================================================
@@ -727,6 +754,7 @@ const progressWrap = document.getElementById('progress-wrap');
 const progressFill = document.getElementById('progress-fill');
 const progressLbl  = document.getElementById('progress-label');
 const vcControls   = document.getElementById('viewport-controls');
+const dropHint     = document.getElementById('drop-hint');
 const camFovSlider = document.getElementById('cam-fov');
 const camFovVal    = document.getElementById('cam-fov-val');
 const camDistSlider = document.getElementById('cam-distance');
@@ -1027,6 +1055,8 @@ let moveSpeedMult = DEFAULT_MOVE_SPEED_MULT;
 const keysDown = new Set();
 
 function initThree() {
+  // Dispose old 3DGS data before recreating renderer/scene.
+  if (gaussianSplatViewer || pointCloud) cleanupCurrentModel();
   if (renderer) { renderer.dispose(); }
 
   scene    = new THREE.Scene();
@@ -1067,32 +1097,99 @@ function startRenderLoop() {
   function loop() {
     animFrameId = requestAnimationFrame(loop);
     updateKeyboardMovement();
-    if (gaussianSplatViewer && typeof gaussianSplatViewer.update === 'function') {
-      gaussianSplatViewer.update(camera, renderer);
+
+    // GaussianSplats3D.Viewer is driven manually here so we can keep the custom
+    // mouse/WASD controls. Do not call DropInViewer.update(camera, renderer):
+    // that is what caused the earlier undefined .bind error in some CDN builds.
+    if (gaussianSplatViewer && modelLoaded &&
+        typeof gaussianSplatViewer.update === 'function' &&
+        typeof gaussianSplatViewer.render === 'function') {
+      gaussianSplatViewer.update();
+      gaussianSplatViewer.render();
+    } else {
+      renderer.render(scene, camera);
     }
-    renderer.render(scene, camera);
   }
   loop();
 }
 
-// Stream PLY from URL and build a real 3D Gaussian Splat scene.
-// The viewer loads the .ply from URL progressively; we only make a lightweight
-// streaming pass first to compute bounds for auto-centering / camera framing.
+// Stream / load a 3DGS scene URL and build a real Gaussian Splat scene.
+// For generated PLY and local PLY we make a lightweight streaming bounds pass first
+// so the camera can auto-center. For .splat / .ksplat, the native 3DGS loader is used
+// directly and the camera starts near the origin.
 async function loadPlyUrlIntoViewer(url, onProgress) {
+  return load3DGSUrlIntoViewer(url, {
+    fileName: 'output.ply',
+    formatHint: 'ply',
+    onProgress,
+  });
+}
+
+async function load3DGSUrlIntoViewer(url, options = {}) {
   initThree();
 
-  onProgress?.(3, 'Loading 3DGS renderer …');
+  const fileName = options.fileName || '';
+  const formatHint = (options.formatHint || getModelExtension(fileName) || 'ply').toLowerCase();
+
+  on3DGSProgress(options.onProgress, 3, 'Loading 3DGS renderer …');
   const GaussianSplats3D = await getGaussianSplats3D();
+  const sceneFormat = getSceneFormat(formatHint, GaussianSplats3D);
 
-  onProgress?.(8, 'Reading model bounds …');
-  const bounds = await computePlyBoundsFromUrl(url, (pct, msg) => {
-    onProgress?.(8 + pct * 0.22, msg || 'Reading model bounds …');
-  });
+  let bounds = null;
+  if (formatHint === 'ply') {
+    on3DGSProgress(options.onProgress, 8, 'Reading model bounds …');
+    bounds = await computePlyBoundsFromUrl(url, (pct, msg) => {
+      on3DGSProgress(options.onProgress, 8 + pct * 0.22, msg || 'Reading model bounds …');
+    });
+  } else if (formatHint === 'splat') {
+    on3DGSProgress(options.onProgress, 8, 'Reading .splat bounds …');
+    bounds = await computeSplatBoundsFromUrl(url, (pct, msg) => {
+      on3DGSProgress(options.onProgress, 8 + pct * 0.22, msg || 'Reading .splat bounds …');
+    });
+  } else {
+    // .ksplat is compressed/optimized, so we let the 3DGS loader open it directly
+    // and start the camera near the origin.
+    bounds = default3DGSBounds();
+    on3DGSProgress(options.onProgress, 18, 'Loading local 3DGS model …');
+  }
 
-  onProgress?.(32, 'Loading Gaussian splats …');
+  on3DGSProgress(options.onProgress, 32, 'Loading Gaussian splats …');
   await buildGaussianSplatScene(url, bounds, GaussianSplats3D, (pct, msg) => {
-    onProgress?.(32 + pct * 0.68, msg || 'Loading Gaussian splats …');
-  });
+    on3DGSProgress(options.onProgress, 32 + pct * 0.68, msg || 'Loading Gaussian splats …');
+  }, sceneFormat, formatHint);
+}
+
+function on3DGSProgress(cb, pct, msg) {
+  if (typeof cb === 'function') cb(Math.max(0, Math.min(100, pct)), msg);
+}
+
+function getModelExtension(name = '') {
+  const m = String(name).toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/);
+  return m ? m[1] : '';
+}
+
+function default3DGSBounds() {
+  return {
+    center: { x: 0, y: 0, z: 0 },
+    radius: 1,
+    bounds: { minX: -1, minY: -1, minZ: -1, maxX: 1, maxY: 1, maxZ: 1 },
+  };
+}
+
+function getSceneFormat(ext, GaussianSplats3D) {
+  const sf = GaussianSplats3D.SceneFormat;
+  if (!sf) return undefined;
+
+  const keyMap = {
+    ply: ['Ply', 'PLY'],
+    splat: ['Splat', 'SPLAT'],
+    ksplat: ['KSplat', 'Ksplat', 'KSPLAT'],
+  };
+
+  for (const key of keyMap[ext] || []) {
+    if (sf[key] !== undefined) return sf[key];
+  }
+  return undefined;
 }
 
 async function getGaussianSplats3D() {
@@ -1102,7 +1199,7 @@ async function getGaussianSplats3D() {
   return gaussianSplats3DModulePromise;
 }
 
-async function buildGaussianSplatScene(url, bounds, GaussianSplats3D, onProgress = () => {}) {
+async function buildGaussianSplatScene(url, bounds, GaussianSplats3D, onProgress = () => {}, sceneFormat = undefined, formatHint = 'ply') {
   cleanupCurrentModel();
 
   const center = bounds?.center || { x: 0, y: 0, z: 0 };
@@ -1121,19 +1218,37 @@ async function buildGaussianSplatScene(url, bounds, GaussianSplats3D, onProgress
   updateCamera();
 
   // Default upright orientation: rotate the 3DGS model 180° around X.
-  // Translation is -R(center), so the model stays centered after rotation.
+  // A 180° X-axis quaternion is [1, 0, 0, 0]. After rotation, the centered
+  // translation becomes [-cx, +cy, +cz], so the scene remains centered.
   const rotationX180 = [1, 0, 0, 0];
   const centeredPositionAfterX180 = [-center.x, center.y, center.z];
 
-  gaussianSplatViewer = new GaussianSplats3D.DropInViewer({
-    gpuAcceleratedSort: true,
+  // Use the real GaussianSplats3D.Viewer instead of THREE.Points or DropInViewer.
+  // Important: DropInViewer can hit "Cannot read properties of undefined (reading 'bind')"
+  // in browser-CDN integrations when it creates internal controls/render hooks. Passing our
+  // renderer + camera to Viewer with selfDrivenMode:false avoids that path and keeps our
+  // existing custom controls.
+  gaussianSplatViewer = new GaussianSplats3D.Viewer({
+    selfDrivenMode: false,
+    renderer: renderer,
+    camera: camera,
+    threeScene: scene,
+    useBuiltInControls: false,
+    ignoreDevicePixelRatio: false,
+    gpuAcceleratedSort: false,
     sharedMemoryForWorkers: false,
     integerBasedSort: false,
     dynamicScene: true,
+    antialiased: false,
     enableOptionalEffects: false,
+    optimizeSplatData: false,
+    freeIntermediateSplatData: true,
+    inMemoryCompressionLevel: 0,
+    webXRMode: GaussianSplats3D.WebXRMode ? GaussianSplats3D.WebXRMode.None : undefined,
+    renderMode: GaussianSplats3D.RenderMode ? GaussianSplats3D.RenderMode.Always : undefined,
+    sceneRevealMode: GaussianSplats3D.SceneRevealMode ? GaussianSplats3D.SceneRevealMode.Instant : undefined,
+    logLevel: GaussianSplats3D.LogLevel ? GaussianSplats3D.LogLevel.None : undefined,
   });
-
-  scene.add(gaussianSplatViewer);
 
   const sceneOptions = {
     splatAlphaRemovalThreshold: 5,
@@ -1148,15 +1263,15 @@ async function buildGaussianSplatScene(url, bounds, GaussianSplats3D, onProgress
     },
   };
 
-  if (GaussianSplats3D.SceneFormat && GaussianSplats3D.SceneFormat.Ply !== undefined) {
+  // Object URLs and /download URLs do not have reliable extensions, so pass
+  // the format explicitly for .ply / .splat / .ksplat whenever the library exposes it.
+  if (sceneFormat !== undefined) {
+    sceneOptions.format = sceneFormat;
+  } else if (formatHint === 'ply' && GaussianSplats3D.SceneFormat && GaussianSplats3D.SceneFormat.Ply !== undefined) {
     sceneOptions.format = GaussianSplats3D.SceneFormat.Ply;
   }
 
-  if (typeof gaussianSplatViewer.addSplatScene === 'function') {
-    await gaussianSplatViewer.addSplatScene(url, sceneOptions);
-  } else {
-    await gaussianSplatViewer.addSplatScenes([{ path: url, ...sceneOptions }]);
-  }
+  await gaussianSplatViewer.addSplatScene(url, sceneOptions);
 
   modelLoaded = true;
   pointCloud = null;
@@ -1166,10 +1281,17 @@ async function buildGaussianSplatScene(url, bounds, GaussianSplats3D, onProgress
 function cleanupCurrentModel() {
   modelLoaded = false;
 
+  if (currentLocalModelUrl) {
+    URL.revokeObjectURL(currentLocalModelUrl);
+    currentLocalModelUrl = null;
+  }
+
   if (gaussianSplatViewer) {
-    scene.remove(gaussianSplatViewer);
     if (typeof gaussianSplatViewer.dispose === 'function') {
       try { gaussianSplatViewer.dispose(); } catch (_) {}
+    }
+    if (typeof gaussianSplatViewer.stop === 'function') {
+      try { gaussianSplatViewer.stop(); } catch (_) {}
     }
     gaussianSplatViewer = null;
   }
@@ -1180,6 +1302,68 @@ function cleanupCurrentModel() {
     if (pointCloud.material) pointCloud.material.dispose();
     pointCloud = null;
   }
+}
+
+async function computeSplatBoundsFromUrl(url, onProgress = () => {}) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Download failed while reading .splat bounds: ${res.statusText}`);
+
+  const contentLength = Number(res.headers.get('content-length') || 0);
+  const bounds = {
+    minX: Infinity, minY: Infinity, minZ: Infinity,
+    maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity,
+  };
+
+  const readChunk = (bytes, start, len) => {
+    const view = new DataView(bytes.buffer, bytes.byteOffset + start, len);
+    const count = Math.floor(len / 32);
+    for (let i = 0; i < count; i++) {
+      const o = i * 32;
+      updateBounds(bounds,
+        view.getFloat32(o, true),
+        view.getFloat32(o + 4, true),
+        view.getFloat32(o + 8, true),
+      );
+    }
+    return count * 32;
+  };
+
+  if (!res.body || !res.body.getReader) {
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    readChunk(bytes, 0, bytes.length - (bytes.length % 32));
+    if (!isFinite(bounds.minX)) return default3DGSBounds();
+    return finalizeBounds(bounds);
+  }
+
+  const reader = res.body.getReader();
+  let pending = new Uint8Array(0);
+  let receivedBytes = 0;
+
+  const concatBytes = (a, b) => {
+    if (!a || a.length === 0) return b;
+    if (!b || b.length === 0) return a;
+    const out = new Uint8Array(a.length + b.length);
+    out.set(a, 0);
+    out.set(b, a.length);
+    return out;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    receivedBytes += value.byteLength;
+    pending = concatBytes(pending, value);
+    const completeBytes = pending.length - (pending.length % 32);
+    if (completeBytes > 0) {
+      readChunk(pending, 0, completeBytes);
+      pending = pending.slice(completeBytes);
+    }
+    const pct = contentLength ? (receivedBytes / contentLength) * 100 : 50;
+    onProgress(Math.min(99, pct), `Reading .splat bounds ${Math.min(99, pct).toFixed(0)}%`);
+  }
+
+  if (!isFinite(bounds.minX)) return default3DGSBounds();
+  return finalizeBounds(bounds);
 }
 
 async function computePlyBoundsFromUrl(url, onProgress = () => {}) {
@@ -1813,6 +1997,100 @@ function parsePly(buffer) {
   return { positions, colors };
 }
 
+
+// ============================================================
+// Local 3DGS Drag & Drop
+// ============================================================
+function setupLocalModelDrop() {
+  const vp = document.getElementById('viewport');
+  if (!vp || vp.dataset.localDropReady === '1') return;
+  vp.dataset.localDropReady = '1';
+
+  const is3DGSDrag = (e) => {
+    const items = Array.from(e.dataTransfer?.items || []);
+    if (items.length === 0) return true;
+    return items.some(item => item.kind === 'file');
+  };
+
+  vp.addEventListener('dragenter', e => {
+    if (!is3DGSDrag(e)) return;
+    e.preventDefault();
+    vp.classList.add('drag-over');
+  });
+
+  vp.addEventListener('dragover', e => {
+    if (!is3DGSDrag(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    vp.classList.add('drag-over');
+  });
+
+  vp.addEventListener('dragleave', e => {
+    if (!vp.contains(e.relatedTarget)) vp.classList.remove('drag-over');
+  });
+
+  vp.addEventListener('drop', async e => {
+    e.preventDefault();
+    vp.classList.remove('drag-over');
+    const file = Array.from(e.dataTransfer?.files || [])[0];
+    if (!file) return;
+    await openLocal3DGSFile(file);
+  });
+}
+
+async function openLocal3DGSFile(file) {
+  const ext = getModelExtension(file.name);
+  if (!['ply', 'splat', 'ksplat'].includes(ext)) {
+    log(`Unsupported local model: ${file.name}. Please drop .ply, .splat, or .ksplat.`, 'err');
+    return;
+  }
+
+  let url = null;
+  try {
+    setStatus('working', 'LOADING');
+    overlayEl.style.display = 'flex';
+    overlayText.textContent = `Opening local ${ext.toUpperCase()} model…`;
+    progressWrap.style.display = 'block';
+    progressFill.style.width = '0%';
+    progressLbl.textContent = 'Preparing local model…';
+    btnViewModel.disabled = true;
+
+    url = URL.createObjectURL(file);
+
+    log(`Opening local 3DGS model: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'info');
+    await load3DGSUrlIntoViewer(url, {
+      fileName: file.name,
+      formatHint: ext,
+      onProgress: (pct, msg) => {
+        progressFill.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(0)}%`;
+        progressLbl.textContent = msg || 'Loading local model…';
+      },
+    });
+    currentLocalModelUrl = url;
+    url = null;
+
+    latestPlyDownloadUrl = null;
+    plyReady = true;
+    btnDownload.style.display = 'none';
+    btnViewModel.style.display = 'block';
+    btnViewModel.onclick = () => openLocal3DGSFile(file);
+
+    overlayEl.style.display = 'none';
+    progressWrap.style.display = 'none';
+    vcControls.style.display = 'flex';
+    setStatus('online', 'READY');
+    log('✓ Local 3DGS model opened in viewer.', 'ok');
+  } catch (e) {
+    if (url) URL.revokeObjectURL(url);
+    log(`Local view failed: ${e.message}`, 'err');
+    overlayText.textContent = 'Failed to open local model.\nSee log for details.';
+    progressWrap.style.display = 'none';
+    setStatus('error', 'ERROR');
+  } finally {
+    btnViewModel.disabled = false;
+  }
+}
+
 // ============================================================
 // Mouse orbit controls
 // ============================================================
@@ -2022,6 +2300,7 @@ window.addEventListener('resize', () => {
 // Init
 // ============================================================
 initThree();
+setupLocalModelDrop();
 
 // Auto-ping if default server set
 if (SERVER_DEFAULT) setTimeout(ping, 500);
