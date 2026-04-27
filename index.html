@@ -9,14 +9,13 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
 
-  <!-- three.js + gaussian splat viewer (via CDN)
-       Important: do NOT also load the old global three.min.js here.
-       GaussianSplats3D imports THREE as an ES module, so this page also uses
-       the same module instance to avoid multiple-THREE viewer bugs. -->
+  <!-- Three.js + Spark 2.0 3D Gaussian Splat viewer (via CDN)
+       Important: keep ONE module-version of THREE shared by Spark and this page. -->
   <script type="importmap">
     {
       "imports": {
-        "three": "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js"
+        "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.180.0/three.module.js",
+        "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.0.0/spark.module.js"
       }
     }
   </script>
@@ -714,6 +713,7 @@
 
 <script type="module">
 import * as THREE from 'three';
+import { SplatMesh, SplatFileType, SparkRenderer } from '@sparkjsdev/spark';
 window.THREE = THREE;
 
 // ============================================================
@@ -1041,14 +1041,14 @@ function resetUI() {
 
 // ============================================================
 // 3D Gaussian Splat Viewer
-// Uses @mkkellogg/gaussian-splats-3d to render real 3D Gaussian splats
-// from the backend .ply, not a normal THREE.Points point cloud preview.
+// Uses Spark 2.0 SplatMesh, a real 3DGS renderer integrated with THREE.js.
+// This avoids the previous GaussianSplats3D Viewer/DropInViewer internal
+// controls path that produced: Cannot read properties of undefined (reading 'bind').
 // ============================================================
 
 const canvas3d    = document.getElementById('canvas-3d');
-let scene, camera, renderer, pointCloud, gaussianSplatViewer, animFrameId;
+let scene, camera, renderer, sparkRenderer, pointCloud, sparkSplatMesh, animFrameId;
 let modelLoaded = false;
-let gaussianSplats3DModulePromise = null;
 let isDragging = false, dragButton = 0, lastMX = 0, lastMY = 0;
 let camPhi = Math.PI / 4, camTheta = Math.PI / 4, camRadius = 4;
 let camTarget = new THREE.Vector3(0, 0, 0);
@@ -1060,24 +1060,34 @@ let moveSpeedMult = DEFAULT_MOVE_SPEED_MULT;
 const keysDown = new Set();
 
 function initThree() {
-  // Dispose old 3DGS data before recreating renderer/scene.
-  if (gaussianSplatViewer || pointCloud) cleanupCurrentModel();
+  if (sparkSplatMesh || pointCloud) cleanupCurrentModel();
+  if (sparkRenderer && typeof sparkRenderer.dispose === 'function') {
+    try { sparkRenderer.dispose(); } catch (_) {}
+    sparkRenderer = null;
+  }
   if (renderer) { renderer.dispose(); }
 
-  scene    = new THREE.Scene();
+  scene = new THREE.Scene();
   scene.background = new THREE.Color(0x080b10);
 
   const w = canvas3d.clientWidth;
   const h = canvas3d.clientHeight;
 
-  camera = new THREE.PerspectiveCamera(DEFAULT_CAM_FOV, w / h, 0.01, 1000);
+  camera = new THREE.PerspectiveCamera(DEFAULT_CAM_FOV, w / h, 0.001, 1000);
   updateCamera();
 
-  renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+  renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: false });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(w, h, false);
 
-  // Axis helper (subtle)
+  sparkRenderer = new SparkRenderer({
+    renderer,
+    sortRadial: true,
+    minPixelRadius: 0.0,
+    maxPixelRadius: 512.0,
+  });
+  scene.add(sparkRenderer);
+
   const axes = new THREE.AxesHelper(0.3);
   axes.material.opacity = 0.2;
   axes.material.transparent = true;
@@ -1102,70 +1112,9 @@ function startRenderLoop() {
   function loop() {
     animFrameId = requestAnimationFrame(loop);
     updateKeyboardMovement();
-
-    // GaussianSplats3D.Viewer is driven manually here so we can keep the custom
-    // mouse/WASD controls. Do not call DropInViewer.update(camera, renderer):
-    // that is what caused the earlier undefined .bind error in some CDN builds.
-    if (gaussianSplatViewer && modelLoaded &&
-        typeof gaussianSplatViewer.update === 'function' &&
-        typeof gaussianSplatViewer.render === 'function') {
-      gaussianSplatViewer.update();
-      gaussianSplatViewer.render();
-    } else {
-      renderer.render(scene, camera);
-    }
+    renderer.render(scene, camera);
   }
   loop();
-}
-
-// Stream / load a 3DGS scene URL and build a real Gaussian Splat scene.
-// For generated PLY and local PLY we make a lightweight streaming bounds pass first
-// so the camera can auto-center. For .splat / .ksplat, the native 3DGS loader is used
-// directly and the camera starts near the origin.
-async function loadPlyUrlIntoViewer(url, onProgress) {
-  return load3DGSUrlIntoViewer(url, {
-    fileName: 'output.ply',
-    formatHint: 'ply',
-    onProgress,
-  });
-}
-
-async function load3DGSUrlIntoViewer(url, options = {}) {
-  initThree();
-
-  const fileName = options.fileName || '';
-  const formatHint = (options.formatHint || getModelExtension(fileName) || 'ply').toLowerCase();
-
-  on3DGSProgress(options.onProgress, 3, 'Loading 3DGS renderer …');
-  const GaussianSplats3D = await getGaussianSplats3D();
-  const sceneFormat = getSceneFormat(formatHint, GaussianSplats3D);
-
-  let bounds = null;
-  if (formatHint === 'ply') {
-    on3DGSProgress(options.onProgress, 8, 'Reading model bounds …');
-    bounds = await computePlyBoundsFromUrl(url, (pct, msg) => {
-      on3DGSProgress(options.onProgress, 8 + pct * 0.22, msg || 'Reading model bounds …');
-    });
-  } else if (formatHint === 'splat') {
-    on3DGSProgress(options.onProgress, 8, 'Reading .splat bounds …');
-    bounds = await computeSplatBoundsFromUrl(url, (pct, msg) => {
-      on3DGSProgress(options.onProgress, 8 + pct * 0.22, msg || 'Reading .splat bounds …');
-    });
-  } else {
-    // .ksplat is compressed/optimized, so we let the 3DGS loader open it directly
-    // and start the camera near the origin.
-    bounds = default3DGSBounds();
-    on3DGSProgress(options.onProgress, 18, 'Loading local 3DGS model …');
-  }
-
-  on3DGSProgress(options.onProgress, 32, 'Loading Gaussian splats …');
-  await buildGaussianSplatScene(url, bounds, GaussianSplats3D, (pct, msg) => {
-    on3DGSProgress(options.onProgress, 32 + pct * 0.68, msg || 'Loading Gaussian splats …');
-  }, sceneFormat, formatHint);
-}
-
-function on3DGSProgress(cb, pct, msg) {
-  if (typeof cb === 'function') cb(Math.max(0, Math.min(100, pct)), msg);
 }
 
 function getModelExtension(name = '') {
@@ -1173,114 +1122,159 @@ function getModelExtension(name = '') {
   return m ? m[1] : '';
 }
 
-function default3DGSBounds() {
-  return {
-    center: { x: 0, y: 0, z: 0 },
-    radius: 1,
-    bounds: { minX: -1, minY: -1, minZ: -1, maxX: 1, maxY: 1, maxZ: 1 },
-  };
-}
-
-function getSceneFormat(ext, GaussianSplats3D) {
-  const sf = GaussianSplats3D.SceneFormat;
-  if (!sf) return undefined;
-
-  const keyMap = {
-    ply: ['Ply', 'PLY'],
-    splat: ['Splat', 'SPLAT'],
-    ksplat: ['KSplat', 'Ksplat', 'KSPLAT'],
-  };
-
-  for (const key of keyMap[ext] || []) {
-    if (sf[key] !== undefined) return sf[key];
+function getSparkFileType(ext) {
+  const key = String(ext || '').toLowerCase();
+  if (!SplatFileType) return undefined;
+  const candidates = {
+    ply: ['PLY', 'Ply', 'ply'],
+    splat: ['SPLAT', 'Splat', 'splat'],
+    ksplat: ['KSPLAT', 'KSplat', 'Ksplat', 'ksplat'],
+    spz: ['SPZ', 'Spz', 'spz'],
+  }[key] || [];
+  for (const c of candidates) {
+    if (SplatFileType[c] !== undefined) return SplatFileType[c];
   }
   return undefined;
 }
 
-async function getGaussianSplats3D() {
-  if (!gaussianSplats3DModulePromise) {
-    gaussianSplats3DModulePromise = import('https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js');
-  }
-  return gaussianSplats3DModulePromise;
+function on3DGSProgress(cb, pct, msg) {
+  if (typeof cb === 'function') cb(Math.max(0, Math.min(100, pct)), msg);
 }
 
-async function buildGaussianSplatScene(url, bounds, GaussianSplats3D, onProgress = () => {}, sceneFormat = undefined, formatHint = 'ply') {
+async function loadPlyUrlIntoViewer(url, onProgress) {
+  on3DGSProgress(onProgress, 3, 'Opening backend stream …');
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Model stream failed: ${res.status} ${res.statusText}`);
+  const len = Number(res.headers.get('content-length') || 0) || undefined;
+  if (!res.body) throw new Error('Browser does not expose a readable model stream.');
+  return load3DGSStreamIntoViewer({
+    stream: res.body,
+    streamLength: len,
+    fileName: 'output.ply',
+    formatHint: 'ply',
+    onProgress,
+  });
+}
+
+async function load3DGSUrlIntoViewer(url, options = {}) {
+  return buildSparkSplatScene({
+    url,
+    fileName: options.fileName || 'model.ply',
+    formatHint: options.formatHint || getModelExtension(options.fileName || url) || 'ply',
+    onProgress: options.onProgress,
+  });
+}
+
+async function load3DGSStreamIntoViewer(options = {}) {
+  return buildSparkSplatScene({
+    stream: options.stream,
+    streamLength: options.streamLength,
+    fileName: options.fileName || 'model.ply',
+    formatHint: options.formatHint || getModelExtension(options.fileName || '') || 'ply',
+    onProgress: options.onProgress,
+  });
+}
+
+async function load3DGSFileIntoViewer(file, onProgress) {
+  const ext = getModelExtension(file.name);
+  return buildSparkSplatScene({
+    stream: file.stream(),
+    streamLength: file.size,
+    fileName: file.name,
+    formatHint: ext,
+    onProgress,
+  });
+}
+
+async function buildSparkSplatScene(options = {}) {
+  initThree();
   cleanupCurrentModel();
 
-  const center = bounds?.center || { x: 0, y: 0, z: 0 };
-  const radius = Math.max(bounds?.radius || 1, 0.01);
+  const ext = (options.formatHint || getModelExtension(options.fileName || '') || 'ply').toLowerCase();
+  const fileType = getSparkFileType(ext);
 
-  modelRadius = radius;
+  modelLoaded = false;
+  modelRadius = 1;
   camTarget.set(0, 0, 0);
   camPhi = Math.PI / 5;
   camTheta = Math.PI / 4;
   camera.fov = DEFAULT_CAM_FOV;
-  camera.near = Math.max(modelRadius * 0.001, 0.001);
-  camera.far = Math.max(modelRadius * 40, 1000);
+  camera.near = 0.001;
+  camera.far = 1000;
   camera.updateProjectionMatrix();
   setCameraDistanceMultiplier(DEFAULT_CAM_DISTANCE_MULT);
   updateCameraPanelUI();
   updateCamera();
 
-  // Default upright orientation: rotate the 3DGS model 180° around X.
-  // A 180° X-axis quaternion is [1, 0, 0, 0]. After rotation, the centered
-  // translation becomes [-cx, +cy, +cz], so the scene remains centered.
-  const rotationX180 = [1, 0, 0, 0];
-  const centeredPositionAfterX180 = [-center.x, center.y, center.z];
-
-  // Use the real GaussianSplats3D.Viewer instead of THREE.Points or DropInViewer.
-  // Important: DropInViewer can hit "Cannot read properties of undefined (reading 'bind')"
-  // in browser-CDN integrations when it creates internal controls/render hooks. Passing our
-  // renderer + camera to Viewer with selfDrivenMode:false avoids that path and keeps our
-  // existing custom controls.
-  gaussianSplatViewer = new GaussianSplats3D.Viewer({
-    selfDrivenMode: false,
-    renderer: renderer,
-    camera: camera,
-    threeScene: scene,
-    useBuiltInControls: false,
-    ignoreDevicePixelRatio: false,
-    gpuAcceleratedSort: false,
-    sharedMemoryForWorkers: false,
-    integerBasedSort: false,
-    dynamicScene: true,
-    antialiased: false,
-    enableOptionalEffects: false,
-    optimizeSplatData: false,
-    freeIntermediateSplatData: true,
-    inMemoryCompressionLevel: 0,
-    webXRMode: GaussianSplats3D.WebXRMode ? GaussianSplats3D.WebXRMode.None : undefined,
-    renderMode: GaussianSplats3D.RenderMode ? GaussianSplats3D.RenderMode.Always : undefined,
-    sceneRevealMode: GaussianSplats3D.SceneRevealMode ? GaussianSplats3D.SceneRevealMode.Instant : undefined,
-    logLevel: GaussianSplats3D.LogLevel ? GaussianSplats3D.LogLevel.None : undefined,
-  });
-
-  const sceneOptions = {
-    splatAlphaRemovalThreshold: 5,
-    showLoadingUI: false,
-    progressiveLoad: true,
-    position: centeredPositionAfterX180,
-    rotation: rotationX180,
-    scale: [1, 1, 1],
-    onProgress: (percent) => {
-      const p = typeof percent === 'number' ? percent : 0;
-      onProgress(Math.max(0, Math.min(100, p)), 'Loading Gaussian splats …');
+  const meshOptions = {
+    fileName: options.fileName || `model.${ext}`,
+    editable: false,
+    raycastable: false,
+    onProgress: (event) => {
+      let pct = 40;
+      if (event && event.lengthComputable && event.total) {
+        pct = 5 + (event.loaded / event.total) * 85;
+      } else if (event && typeof event.loaded === 'number' && options.streamLength) {
+        pct = 5 + (event.loaded / options.streamLength) * 85;
+      }
+      on3DGSProgress(options.onProgress, pct, 'Loading 3D Gaussian splats …');
     },
   };
 
-  // Object URLs and /download URLs do not have reliable extensions, so pass
-  // the format explicitly for .ply / .splat / .ksplat whenever the library exposes it.
-  if (sceneFormat !== undefined) {
-    sceneOptions.format = sceneFormat;
-  } else if (formatHint === 'ply' && GaussianSplats3D.SceneFormat && GaussianSplats3D.SceneFormat.Ply !== undefined) {
-    sceneOptions.format = GaussianSplats3D.SceneFormat.Ply;
+  if (options.stream) {
+    meshOptions.stream = options.stream;
+    if (options.streamLength) meshOptions.streamLength = options.streamLength;
+  } else if (options.url) {
+    meshOptions.url = options.url;
+  } else if (options.fileBytes) {
+    meshOptions.fileBytes = options.fileBytes;
+  } else {
+    throw new Error('No 3DGS source provided.');
   }
+  if (fileType !== undefined) meshOptions.fileType = fileType;
 
-  await gaussianSplatViewer.addSplatScene(url, sceneOptions);
+  on3DGSProgress(options.onProgress, 8, 'Creating Spark 3DGS mesh …');
+  sparkSplatMesh = new SplatMesh(meshOptions);
+  sparkSplatMesh.quaternion.set(1, 0, 0, 0);
+  sparkSplatMesh.scale.setScalar(1);
+  scene.add(sparkSplatMesh);
 
+  await sparkSplatMesh.initialized;
+  on3DGSProgress(options.onProgress, 92, 'Framing model …');
+
+  frameSparkSplatMesh(sparkSplatMesh);
   modelLoaded = true;
   pointCloud = null;
-  onProgress(100, 'Gaussian splat model ready.');
+  on3DGSProgress(options.onProgress, 100, '3D Gaussian splat model ready.');
+}
+
+function frameSparkSplatMesh(mesh) {
+  let center = new THREE.Vector3(0, 0, 0);
+  let radius = 1;
+  try {
+    const box = mesh.getBoundingBox ? mesh.getBoundingBox(true) : null;
+    if (box && box.isBox3 && !box.isEmpty()) {
+      center = box.getCenter(new THREE.Vector3());
+      radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.01);
+    }
+  } catch (e) {
+    console.warn('Could not compute Spark splat bounds, using default camera frame.', e);
+  }
+
+  modelRadius = Math.max(radius, 0.01);
+  mesh.position.set(-center.x, center.y, center.z);
+  mesh.updateMatrixWorld(true);
+
+  camTarget.set(0, 0, 0);
+  camPhi = Math.PI / 5;
+  camTheta = Math.PI / 4;
+  camera.fov = DEFAULT_CAM_FOV;
+  camera.near = Math.max(modelRadius * 0.0005, 0.0001);
+  camera.far = Math.max(modelRadius * 100, 1000);
+  camera.updateProjectionMatrix();
+  setCameraDistanceMultiplier(DEFAULT_CAM_DISTANCE_MULT);
+  updateCameraPanelUI();
+  updateCamera();
 }
 
 function cleanupCurrentModel() {
@@ -1291,314 +1285,20 @@ function cleanupCurrentModel() {
     currentLocalModelUrl = null;
   }
 
-  if (gaussianSplatViewer) {
-    if (typeof gaussianSplatViewer.dispose === 'function') {
-      try { gaussianSplatViewer.dispose(); } catch (_) {}
+  if (sparkSplatMesh) {
+    try { scene && scene.remove(sparkSplatMesh); } catch (_) {}
+    if (typeof sparkSplatMesh.dispose === 'function') {
+      try { sparkSplatMesh.dispose(); } catch (_) {}
     }
-    if (typeof gaussianSplatViewer.stop === 'function') {
-      try { gaussianSplatViewer.stop(); } catch (_) {}
-    }
-    gaussianSplatViewer = null;
+    sparkSplatMesh = null;
   }
 
   if (pointCloud) {
-    scene.remove(pointCloud);
+    try { scene && scene.remove(pointCloud); } catch (_) {}
     if (pointCloud.geometry) pointCloud.geometry.dispose();
     if (pointCloud.material) pointCloud.material.dispose();
     pointCloud = null;
   }
-}
-
-async function computeSplatBoundsFromUrl(url, onProgress = () => {}) {
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`Download failed while reading .splat bounds: ${res.statusText}`);
-
-  const contentLength = Number(res.headers.get('content-length') || 0);
-  const bounds = {
-    minX: Infinity, minY: Infinity, minZ: Infinity,
-    maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity,
-  };
-
-  const readChunk = (bytes, start, len) => {
-    const view = new DataView(bytes.buffer, bytes.byteOffset + start, len);
-    const count = Math.floor(len / 32);
-    for (let i = 0; i < count; i++) {
-      const o = i * 32;
-      updateBounds(bounds,
-        view.getFloat32(o, true),
-        view.getFloat32(o + 4, true),
-        view.getFloat32(o + 8, true),
-      );
-    }
-    return count * 32;
-  };
-
-  if (!res.body || !res.body.getReader) {
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    readChunk(bytes, 0, bytes.length - (bytes.length % 32));
-    if (!isFinite(bounds.minX)) return default3DGSBounds();
-    return finalizeBounds(bounds);
-  }
-
-  const reader = res.body.getReader();
-  let pending = new Uint8Array(0);
-  let receivedBytes = 0;
-
-  const concatBytes = (a, b) => {
-    if (!a || a.length === 0) return b;
-    if (!b || b.length === 0) return a;
-    const out = new Uint8Array(a.length + b.length);
-    out.set(a, 0);
-    out.set(b, a.length);
-    return out;
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    receivedBytes += value.byteLength;
-    pending = concatBytes(pending, value);
-    const completeBytes = pending.length - (pending.length % 32);
-    if (completeBytes > 0) {
-      readChunk(pending, 0, completeBytes);
-      pending = pending.slice(completeBytes);
-    }
-    const pct = contentLength ? (receivedBytes / contentLength) * 100 : 50;
-    onProgress(Math.min(99, pct), `Reading .splat bounds ${Math.min(99, pct).toFixed(0)}%`);
-  }
-
-  if (!isFinite(bounds.minX)) return default3DGSBounds();
-  return finalizeBounds(bounds);
-}
-
-async function computePlyBoundsFromUrl(url, onProgress = () => {}) {
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`Download failed while reading bounds: ${res.statusText}`);
-
-  const contentLength = Number(res.headers.get('content-length') || 0);
-
-  if (!res.body || !res.body.getReader) {
-    const buffer = await res.arrayBuffer();
-    return computePlyBoundsFromBuffer(buffer);
-  }
-
-  const reader = res.body.getReader();
-  let receivedBytes = 0;
-  let pending = new Uint8Array(0);
-  let headerParsed = false;
-  let meta = null;
-  let vertexIndex = 0;
-  let asciiTail = '';
-
-  const bounds = {
-    minX: Infinity, minY: Infinity, minZ: Infinity,
-    maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity,
-  };
-
-  const concatBytes = (a, b) => {
-    if (!a || a.length === 0) return b;
-    if (!b || b.length === 0) return a;
-    const out = new Uint8Array(a.length + b.length);
-    out.set(a, 0);
-    out.set(b, a.length);
-    return out;
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    receivedBytes += value.byteLength;
-    pending = concatBytes(pending, value);
-
-    if (!headerParsed) {
-      const headerEnd = findPlyHeaderEnd(pending);
-      if (headerEnd < 0) continue;
-      meta = parsePlyHeaderForBounds(pending.slice(0, headerEnd));
-      pending = pending.slice(headerEnd);
-      headerParsed = true;
-      if (!meta.xProp || !meta.yProp || !meta.zProp) throw new Error('Invalid PLY: missing x/y/z properties.');
-    }
-
-    if (meta.isBinaryLE || meta.isBinaryBE) {
-      const little = meta.isBinaryLE;
-      const completeBytes = Math.floor(pending.length / meta.stride) * meta.stride;
-      if (completeBytes > 0) {
-        const view = new DataView(pending.buffer, pending.byteOffset, completeBytes);
-        const completeVertices = completeBytes / meta.stride;
-        for (let i = 0; i < completeVertices && vertexIndex < meta.vertexCount; i++, vertexIndex++) {
-          const base = i * meta.stride;
-          const x = readPlyNumber(view, base + meta.xProp.offset, meta.xProp.type, little);
-          const y = readPlyNumber(view, base + meta.yProp.offset, meta.yProp.type, little);
-          const z = readPlyNumber(view, base + meta.zProp.offset, meta.zProp.type, little);
-          updateBounds(bounds, x, y, z);
-        }
-        pending = pending.slice(completeBytes);
-      }
-    } else if (meta.isAscii) {
-      const text = asciiTail + new TextDecoder().decode(pending, { stream: true });
-      const lines = text.split(/\r?\n/);
-      asciiTail = lines.pop() || '';
-      for (const line of lines) {
-        if (vertexIndex >= meta.vertexCount) break;
-        const parts = line.trim().split(/\s+/);
-        if (parts.length <= Math.max(meta.xIndex, meta.yIndex, meta.zIndex)) continue;
-        updateBounds(bounds, +parts[meta.xIndex], +parts[meta.yIndex], +parts[meta.zIndex]);
-        vertexIndex++;
-      }
-      pending = new Uint8Array(0);
-    }
-
-    const pct = contentLength ? (receivedBytes / contentLength) * 100 : Math.min(99, (vertexIndex / Math.max(meta?.vertexCount || 1, 1)) * 100);
-    onProgress(pct, `Reading bounds ${Math.min(100, pct).toFixed(0)}%`);
-
-    if (meta && vertexIndex >= meta.vertexCount) break;
-  }
-
-  if (meta?.isAscii && asciiTail && vertexIndex < meta.vertexCount) {
-    const parts = asciiTail.trim().split(/\s+/);
-    if (parts.length > Math.max(meta.xIndex, meta.yIndex, meta.zIndex)) {
-      updateBounds(bounds, +parts[meta.xIndex], +parts[meta.yIndex], +parts[meta.zIndex]);
-    }
-  }
-
-  if (!isFinite(bounds.minX)) throw new Error('Could not compute model bounds from PLY.');
-  return finalizeBounds(bounds);
-}
-
-function computePlyBoundsFromBuffer(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const headerEnd = findPlyHeaderEnd(bytes);
-  if (headerEnd < 0) throw new Error('Invalid PLY: no end_header found.');
-  const meta = parsePlyHeaderForBounds(bytes.slice(0, headerEnd));
-  const bounds = {
-    minX: Infinity, minY: Infinity, minZ: Infinity,
-    maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity,
-  };
-
-  if (meta.isBinaryLE || meta.isBinaryBE) {
-    const little = meta.isBinaryLE;
-    const view = new DataView(buffer, headerEnd);
-    for (let i = 0; i < meta.vertexCount; i++) {
-      const base = i * meta.stride;
-      const x = readPlyNumber(view, base + meta.xProp.offset, meta.xProp.type, little);
-      const y = readPlyNumber(view, base + meta.yProp.offset, meta.yProp.type, little);
-      const z = readPlyNumber(view, base + meta.zProp.offset, meta.zProp.type, little);
-      updateBounds(bounds, x, y, z);
-    }
-  } else {
-    const text = new TextDecoder().decode(bytes.slice(headerEnd));
-    const lines = text.split(/\r?\n/);
-    for (let i = 0; i < Math.min(lines.length, meta.vertexCount); i++) {
-      const parts = lines[i].trim().split(/\s+/);
-      if (parts.length <= Math.max(meta.xIndex, meta.yIndex, meta.zIndex)) continue;
-      updateBounds(bounds, +parts[meta.xIndex], +parts[meta.yIndex], +parts[meta.zIndex]);
-    }
-  }
-
-  return finalizeBounds(bounds);
-}
-
-function findPlyHeaderEnd(bytes) {
-  for (let i = 0; i <= bytes.length - 10; i++) {
-    if (bytes[i]===101&&bytes[i+1]===110&&bytes[i+2]===100&&
-        bytes[i+3]===95&&bytes[i+4]===104&&bytes[i+5]===101&&
-        bytes[i+6]===97&&bytes[i+7]===100&&bytes[i+8]===101&&bytes[i+9]===114) {
-      let end = i + 10;
-      while (end < bytes.length && (bytes[end] === 10 || bytes[end] === 13)) end++;
-      return end;
-    }
-  }
-  return -1;
-}
-
-function parsePlyHeaderForBounds(headerBytes) {
-  const headerText = new TextDecoder().decode(headerBytes);
-  const vcMatch = headerText.match(/element vertex (\d+)/);
-  if (!vcMatch) throw new Error('Invalid PLY: no vertex count found.');
-
-  const vertexCount = parseInt(vcMatch[1], 10);
-  const isBinaryLE = headerText.includes('format binary_little_endian');
-  const isBinaryBE = headerText.includes('format binary_big_endian');
-  const isAscii = headerText.includes('format ascii');
-
-  const typeSizes = {
-    char:1, uchar:1, int8:1, uint8:1,
-    short:2, ushort:2, int16:2, uint16:2,
-    int:4, uint:4, int32:4, uint32:4,
-    float:4, float32:4, double:8, float64:8,
-  };
-
-  const lines = headerText.split(/\r?\n/);
-  const props = [];
-  let inVertex = false;
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (line.startsWith('element vertex')) { inVertex = true; continue; }
-    if (line.startsWith('element ') && !line.startsWith('element vertex')) { inVertex = false; }
-    if (inVertex && line.startsWith('property')) {
-      const parts = line.split(/\s+/);
-      if (parts[1] === 'list') continue;
-      const type = parts[1];
-      const name = parts[2];
-      const size = typeSizes[type] || 4;
-      props.push({ type, name, size, offset: 0 });
-    }
-  }
-
-  let stride = 0;
-  for (const p of props) {
-    p.offset = stride;
-    stride += p.size;
-  }
-
-  const xProp = props.find(p => p.name === 'x');
-  const yProp = props.find(p => p.name === 'y');
-  const zProp = props.find(p => p.name === 'z');
-
-  return {
-    vertexCount, isBinaryLE, isBinaryBE, isAscii, props, stride, xProp, yProp, zProp,
-    xIndex: props.findIndex(p => p.name === 'x'),
-    yIndex: props.findIndex(p => p.name === 'y'),
-    zIndex: props.findIndex(p => p.name === 'z'),
-  };
-}
-
-function readPlyNumber(view, offset, type, little) {
-  switch (type) {
-    case 'char': case 'int8': return view.getInt8(offset);
-    case 'uchar': case 'uint8': return view.getUint8(offset);
-    case 'short': case 'int16': return view.getInt16(offset, little);
-    case 'ushort': case 'uint16': return view.getUint16(offset, little);
-    case 'int': case 'int32': return view.getInt32(offset, little);
-    case 'uint': case 'uint32': return view.getUint32(offset, little);
-    case 'double': case 'float64': return view.getFloat64(offset, little);
-    case 'float': case 'float32':
-    default: return view.getFloat32(offset, little);
-  }
-}
-
-function updateBounds(bounds, x, y, z) {
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
-  bounds.minX = Math.min(bounds.minX, x);
-  bounds.minY = Math.min(bounds.minY, y);
-  bounds.minZ = Math.min(bounds.minZ, z);
-  bounds.maxX = Math.max(bounds.maxX, x);
-  bounds.maxY = Math.max(bounds.maxY, y);
-  bounds.maxZ = Math.max(bounds.maxZ, z);
-}
-
-function finalizeBounds(bounds) {
-  const center = {
-    x: (bounds.minX + bounds.maxX) * 0.5,
-    y: (bounds.minY + bounds.maxY) * 0.5,
-    z: (bounds.minZ + bounds.maxZ) * 0.5,
-  };
-  const dx = bounds.maxX - bounds.minX;
-  const dy = bounds.maxY - bounds.minY;
-  const dz = bounds.maxZ - bounds.minZ;
-  const radius = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz) * 0.5, 0.01);
-  return { center, radius, bounds };
 }
 
 // Fallback entry kept for compatibility with local ArrayBuffer loading if needed.
@@ -2050,29 +1750,20 @@ async function openLocal3DGSFile(file) {
     return;
   }
 
-  let url = null;
   try {
     setStatus('working', 'LOADING');
     overlayEl.style.display = 'flex';
     overlayText.textContent = `Opening local ${ext.toUpperCase()} model…`;
     progressWrap.style.display = 'block';
     progressFill.style.width = '0%';
-    progressLbl.textContent = 'Preparing local model…';
+    progressLbl.textContent = 'Preparing local stream…';
     btnViewModel.disabled = true;
 
-    url = URL.createObjectURL(file);
-
     log(`Opening local 3DGS model: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'info');
-    await load3DGSUrlIntoViewer(url, {
-      fileName: file.name,
-      formatHint: ext,
-      onProgress: (pct, msg) => {
-        progressFill.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(0)}%`;
-        progressLbl.textContent = msg || 'Loading local model…';
-      },
+    await load3DGSFileIntoViewer(file, (pct, msg) => {
+      progressFill.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(0)}%`;
+      progressLbl.textContent = msg || 'Loading local model…';
     });
-    currentLocalModelUrl = url;
-    url = null;
 
     latestPlyDownloadUrl = null;
     plyReady = true;
@@ -2086,7 +1777,6 @@ async function openLocal3DGSFile(file) {
     setStatus('online', 'READY');
     log('✓ Local 3DGS model opened in viewer.', 'ok');
   } catch (e) {
-    if (url) URL.revokeObjectURL(url);
     log(`Local view failed: ${e.message}`, 'err');
     overlayText.textContent = 'Failed to open local model.\nSee log for details.';
     progressWrap.style.display = 'none';
