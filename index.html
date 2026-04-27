@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WorldGen · 3D Scene Generator</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
+
+  <!-- three.js + gaussian splat viewer (via CDN) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <style>
+    /* ── Reset & Variables ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #080b10;
+      --surface:   #0e1318;
+      --border:    #1e2830;
+      --accent:    #00e5ff;
+      --accent2:   #7b61ff;
+      --text:      #e8edf2;
+      --muted:     #5a6a7a;
+      --danger:    #ff4560;
+      --success:   #00e096;
+      --r:         8px;
+      --font-ui:   'Syne', sans-serif;
+      --font-mono: 'Space Mono', monospace;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-ui);
+      overflow: hidden;
+    }
+
+    /* ── Layout ── */
+    #app {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      grid-template-rows: 56px 1fr;
+      height: 100vh;
+    }
+
+    /* ── Top Bar ── */
+    #topbar {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    #topbar .logo {
+      font-size: 1.1rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      color: var(--accent);
+    }
+
+    #topbar .logo span { color: var(--text); }
+
+    #topbar .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: background .3s;
+      margin-left: auto;
+    }
+    #topbar .status-dot.online  { background: var(--success); box-shadow: 0 0 6px var(--success); }
+    #topbar .status-dot.working { background: var(--accent);  box-shadow: 0 0 6px var(--accent);
+      animation: pulse 1s infinite; }
+    #topbar .status-dot.error   { background: var(--danger);  box-shadow: 0 0 6px var(--danger); }
+
+    #topbar .status-label {
+      font-size: .75rem;
+      font-family: var(--font-mono);
+      color: var(--muted);
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: .4; }
+    }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      padding: 24px 20px;
+      gap: 24px;
+    }
+
+    .section-label {
+      font-size: .65rem;
+      font-family: var(--font-mono);
+      letter-spacing: .12em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    /* ── Server URL ── */
+    #server-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    #server-url {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 8px 12px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: .78rem;
+      outline: none;
+      transition: border-color .2s;
+    }
+    #server-url:focus { border-color: var(--accent); }
+
+    #btn-ping {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: .72rem;
+      padding: 8px 12px;
+      cursor: pointer;
+      transition: all .2s;
+      white-space: nowrap;
+    }
+    #btn-ping:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Mode Tabs ── */
+    #mode-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 4px;
+    }
+
+    .tab-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      color: var(--muted);
+      font-family: var(--font-ui);
+      font-size: .75rem;
+      font-weight: 600;
+      padding: 8px 4px;
+      cursor: pointer;
+      transition: all .2s;
+    }
+    .tab-btn:hover { border-color: var(--accent2); color: var(--text); }
+    .tab-btn.active {
+      background: var(--accent2);
+      border-color: var(--accent2);
+      color: #fff;
+    }
+
+    /* ── Textarea ── */
+    #prompt-wrap { position: relative; }
+
+    #prompt {
+      width: 100%;
+      min-height: 96px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 12px;
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: .88rem;
+      resize: vertical;
+      outline: none;
+      transition: border-color .2s;
+      line-height: 1.5;
+    }
+    #prompt:focus { border-color: var(--accent2); }
+    #prompt::placeholder { color: var(--muted); }
+
+    /* ── Image Upload ── */
+    .upload-zone {
+      border: 1px dashed var(--border);
+      border-radius: var(--r);
+      padding: 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all .2s;
+      position: relative;
+      overflow: hidden;
+    }
+    .upload-zone:hover,
+    .upload-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(0, 229, 255, .04);
+    }
+    .upload-zone input[type=file] {
+      position: absolute; inset: 0;
+      opacity: 0; cursor: pointer;
+      width: 100%; height: 100%;
+    }
+    .upload-zone .icon { font-size: 1.6rem; margin-bottom: 6px; }
+    .upload-zone .hint { font-size: .75rem; color: var(--muted); font-family: var(--font-mono); }
+    .upload-zone .preview {
+      width: 100%; max-height: 140px;
+      object-fit: cover;
+      border-radius: 4px;
+      margin-top: 8px;
+      display: none;
+    }
+    .upload-zone.has-image .preview   { display: block; }
+    .upload-zone.has-image .icon,
+    .upload-zone.has-image .hint      { display: none; }
+
+    /* ── Advanced Toggle ── */
+    #adv-toggle {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: .72rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0;
+      letter-spacing: .06em;
+    }
+    #adv-toggle:hover { color: var(--text); }
+    #adv-toggle .chevron { transition: transform .2s; display: inline-block; }
+    #adv-toggle.open .chevron { transform: rotate(90deg); }
+
+    #adv-panel {
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 10px;
+    }
+    #adv-panel.visible { display: flex; }
+
+    .field-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .field-row label {
+      font-size: .78rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    input[type=range] {
+      -webkit-appearance: none;
+      flex: 1;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      outline: none;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: var(--accent2);
+      cursor: pointer;
+    }
+    .range-val {
+      font-family: var(--font-mono);
+      font-size: .72rem;
+      color: var(--accent);
+      min-width: 36px;
+      text-align: right;
+    }
+
+    /* toggle switch */
+    .toggle-wrap { display: flex; align-items: center; gap: 8px; }
+    .toggle {
+      position: relative;
+      width: 36px; height: 20px;
+      flex-shrink: 0;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .slider-track {
+      position: absolute; inset: 0;
+      background: var(--border);
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background .2s;
+    }
+    .slider-track::before {
+      content: '';
+      position: absolute;
+      width: 14px; height: 14px;
+      left: 3px; top: 3px;
+      background: var(--muted);
+      border-radius: 50%;
+      transition: all .2s;
+    }
+    .toggle input:checked + .slider-track { background: var(--accent2); }
+    .toggle input:checked + .slider-track::before {
+      transform: translateX(16px);
+      background: #fff;
+    }
+
+    /* ── Generate Button ── */
+    #btn-generate {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, var(--accent2), #4a90e2);
+      border: none;
+      border-radius: var(--r);
+      color: #fff;
+      font-family: var(--font-ui);
+      font-size: .95rem;
+      font-weight: 700;
+      letter-spacing: .04em;
+      cursor: pointer;
+      transition: opacity .2s, transform .1s;
+      position: relative;
+      overflow: hidden;
+    }
+    #btn-generate::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, rgba(255,255,255,.12), transparent);
+      opacity: 0;
+      transition: opacity .2s;
+    }
+    #btn-generate:hover::after { opacity: 1; }
+    #btn-generate:active { transform: scale(.98); }
+    #btn-generate:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* ── Log ── */
+    #log {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 10px 12px;
+      font-family: var(--font-mono);
+      font-size: .7rem;
+      color: var(--muted);
+      overflow-y: auto;
+      min-height: 80px;
+      max-height: 160px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      line-height: 1.6;
+    }
+    .log-ok   { color: var(--success); }
+    .log-err  { color: var(--danger); }
+    .log-info { color: var(--accent); }
+
+    /* ── Download / View Buttons ── */
+    #btn-download,
+    #btn-view-model {
+      width: 100%;
+      padding: 10px;
+      background: transparent;
+      border: 1px solid var(--accent);
+      border-radius: var(--r);
+      color: var(--accent);
+      font-family: var(--font-ui);
+      font-size: .85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .2s;
+      display: none;
+    }
+    #btn-view-model { margin-top: -14px; }
+    #btn-download:hover,
+    #btn-view-model:hover { background: rgba(0,229,255,.1); }
+    #btn-view-model:disabled { opacity: .45; cursor: not-allowed; }
+
+    /* ── Viewport ── */
+    #viewport {
+      position: relative;
+      background: var(--bg);
+      overflow: hidden;
+    }
+
+    #canvas-3d {
+      width: 100%; height: 100%;
+      display: block;
+    }
+
+    /* ── Overlay States ── */
+    #overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      pointer-events: none;
+    }
+
+    .overlay-icon {
+      font-size: 3rem;
+      opacity: .25;
+    }
+
+    .overlay-text {
+      font-family: var(--font-mono);
+      font-size: .8rem;
+      color: var(--muted);
+      text-align: center;
+      max-width: 280px;
+      line-height: 1.7;
+    }
+
+    /* Progress bar */
+    #progress-wrap {
+      width: 220px;
+      display: none;
+    }
+
+    #progress-bar {
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    #progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent2), var(--accent));
+      border-radius: 2px;
+      width: 0%;
+      transition: width .3s;
+      animation: shimmer 1.5s infinite;
+    }
+
+    @keyframes shimmer {
+      0%   { filter: brightness(1); }
+      50%  { filter: brightness(1.4); }
+      100% { filter: brightness(1); }
+    }
+
+    #progress-label {
+      font-family: var(--font-mono);
+      font-size: .68rem;
+      color: var(--muted);
+      text-align: center;
+      margin-top: 6px;
+    }
+
+    /* ── Viewport Controls ── */
+    #viewport-controls {
+      position: absolute;
+      top: 16px; right: 16px;
+      display: flex;
+      gap: 8px;
+      pointer-events: all;
+    }
+
+    .vc-btn {
+      background: rgba(14, 19, 24, .85);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: .7rem;
+      padding: 6px 10px;
+      cursor: pointer;
+      backdrop-filter: blur(6px);
+      transition: all .2s;
+    }
+    .vc-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* ── Grid lines bg ── */
+    #viewport::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(30,40,48,.6) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(30,40,48,.6) 1px, transparent 1px);
+      background-size: 48px 48px;
+      pointer-events: none;
+      z-index: 0;
+      opacity: .6;
+    }
+    #canvas-3d { position: relative; z-index: 1; }
+    #overlay    { z-index: 2; }
+    #viewport-controls { z-index: 3; }
+  </style>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- Top Bar -->
+  <header id="topbar">
+    <div class="logo">World<span>Gen</span></div>
+    <div style="font-size:.72rem;color:var(--muted);font-family:var(--font-mono);margin-left:4px;">
+      · 3D Gaussian Splat Generator
+    </div>
+    <div class="status-label" id="status-label">OFFLINE</div>
+    <div class="status-dot" id="status-dot"></div>
+  </header>
+
+  <!-- Sidebar -->
+  <aside id="sidebar">
+
+    <!-- Server -->
+    <div>
+      <div class="section-label">Server</div>
+      <div id="server-row">
+        <input id="server-url" type="text"
+          placeholder="http://your-autodl-ip:port"
+          value="" />
+        <button id="btn-ping">PING</button>
+      </div>
+    </div>
+
+    <!-- Mode -->
+    <div>
+      <div class="section-label">Mode</div>
+      <div id="mode-tabs">
+        <button class="tab-btn active" data-mode="text">Text</button>
+        <button class="tab-btn" data-mode="image">Image</button>
+        <button class="tab-btn" data-mode="pano">Panorama</button>
+      </div>
+    </div>
+
+    <!-- Prompt -->
+    <div id="prompt-section">
+      <div class="section-label">Prompt</div>
+      <div id="prompt-wrap">
+        <textarea id="prompt" rows="4"
+          placeholder="A vast alien desert at golden hour, ancient stone formations, dramatic sky…"></textarea>
+      </div>
+    </div>
+
+    <!-- Image Upload (hidden in text mode) -->
+    <div id="image-section" style="display:none;">
+      <div class="section-label" id="upload-label">Reference Image</div>
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" id="file-input" accept="image/*" />
+        <div class="icon">🖼</div>
+        <div class="hint">Click or drag to upload</div>
+        <img class="preview" id="img-preview" alt="preview" />
+      </div>
+    </div>
+
+    <!-- Advanced -->
+    <div>
+      <button id="adv-toggle"><span class="chevron">▶</span> ADVANCED OPTIONS</button>
+      <div id="adv-panel">
+        <div class="field-row">
+          <label>Resolution</label>
+          <input type="range" id="resolution" min="800" max="2048" step="100" value="1600" />
+          <span class="range-val" id="res-val">1600</span>
+        </div>
+        <div class="field-row">
+          <label>Use Sharp</label>
+          <div class="toggle-wrap">
+            <label class="toggle">
+              <input type="checkbox" id="use-sharp" />
+              <span class="slider-track"></span>
+            </label>
+            <span style="font-size:.72rem;color:var(--muted);font-family:var(--font-mono);">
+              higher quality
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Generate -->
+    <button id="btn-generate">⚡ GENERATE SCENE</button>
+
+    <!-- Log -->
+    <div>
+      <div class="section-label">Log</div>
+      <div id="log">Waiting for input…</div>
+    </div>
+
+    <!-- Download / View -->
+    <button id="btn-download">⬇ Download output.ply</button>
+    <button id="btn-view-model">👁 View Model</button>
+
+  </aside>
+
+  <!-- 3D Viewport -->
+  <main id="viewport">
+    <canvas id="canvas-3d"></canvas>
+
+    <div id="overlay">
+      <div class="overlay-icon">🌌</div>
+      <div class="overlay-text" id="overlay-text">
+        Configure your server URL,<br>enter a prompt and hit Generate.
+      </div>
+      <div id="progress-wrap">
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+        <div id="progress-label" id="progress-label">Generating…</div>
+      </div>
+    </div>
+
+    <div id="viewport-controls" style="display:none;">
+      <button class="vc-btn" id="btn-reset-cam">RESET CAM</button>
+      <button class="vc-btn" id="btn-fullscreen">⛶ FULLSCREEN</button>
+    </div>
+  </main>
+
+</div>
+
+<script>
+// ============================================================
+// CONFIG — change SERVER_DEFAULT to your AutoDL public address
+// ============================================================
+const SERVER_DEFAULT = '';   // e.g. 'http://123.45.67.89:8000'
+
+// ============================================================
+// State
+// ============================================================
+let currentMode   = 'text';    // 'text' | 'image' | 'pano'
+let selectedFile  = null;
+let plyReady      = false;
+let latestPlyBlob = null;
+let splatRenderer = null;
+
+// ============================================================
+// DOM refs
+// ============================================================
+const serverUrlEl  = document.getElementById('server-url');
+const statusDot    = document.getElementById('status-dot');
+const statusLabel  = document.getElementById('status-label');
+const btnPing      = document.getElementById('btn-ping');
+const promptEl     = document.getElementById('prompt');
+const imageSection = document.getElementById('image-section');
+const uploadZone   = document.getElementById('upload-zone');
+const fileInput    = document.getElementById('file-input');
+const imgPreview   = document.getElementById('img-preview');
+const uploadLabel  = document.getElementById('upload-label');
+const resSlider    = document.getElementById('resolution');
+const resVal       = document.getElementById('res-val');
+const useSharp     = document.getElementById('use-sharp');
+const advToggle    = document.getElementById('adv-toggle');
+const advPanel     = document.getElementById('adv-panel');
+const btnGenerate  = document.getElementById('btn-generate');
+const logEl        = document.getElementById('log');
+const btnDownload  = document.getElementById('btn-download');
+const btnViewModel = document.getElementById('btn-view-model');
+const overlayEl    = document.getElementById('overlay');
+const overlayText  = document.getElementById('overlay-text');
+const progressWrap = document.getElementById('progress-wrap');
+const progressFill = document.getElementById('progress-fill');
+const progressLbl  = document.getElementById('progress-label');
+const vcControls   = document.getElementById('viewport-controls');
+
+if (SERVER_DEFAULT) serverUrlEl.value = SERVER_DEFAULT;
+
+// ============================================================
+// Logging
+// ============================================================
+function log(msg, type = '') {
+  const cls = type ? `log-${type}` : '';
+  const now = new Date().toLocaleTimeString();
+  logEl.innerHTML += `<span class="${cls}">[${now}] ${msg}\n</span>`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function clearLog() { logEl.innerHTML = ''; }
+
+// ============================================================
+// Status dot
+// ============================================================
+function setStatus(state, label) {
+  statusDot.className = 'status-dot ' + state;
+  statusLabel.textContent = label;
+}
+
+// ============================================================
+// Ping
+// ============================================================
+async function ping() {
+  const base = serverUrlEl.value.trim().replace(/\/$/, '');
+  if (!base) { log('Please enter a server URL.', 'err'); return; }
+
+  setStatus('working', 'PINGING');
+  btnPing.disabled = true;
+  try {
+    const r = await fetch(`${base}/health`, { signal: AbortSignal.timeout(6000) });
+    const d = await r.json();
+    setStatus('online', 'ONLINE');
+    log(`Server OK — device: ${d.device}, low_vram: ${d.low_vram}`, 'ok');
+  } catch (e) {
+    setStatus('error', 'ERROR');
+    log(`Ping failed: ${e.message}`, 'err');
+  } finally {
+    btnPing.disabled = false;
+  }
+}
+
+btnPing.addEventListener('click', ping);
+
+// ============================================================
+// Mode Tabs
+// ============================================================
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentMode = btn.dataset.mode;
+
+    if (currentMode === 'text') {
+      imageSection.style.display = 'none';
+    } else {
+      imageSection.style.display = 'block';
+      uploadLabel.textContent = currentMode === 'pano'
+        ? 'Panorama Image (2:1 ratio)'
+        : 'Reference Image';
+    }
+  });
+});
+
+// ============================================================
+// File Upload
+// ============================================================
+fileInput.addEventListener('change', e => {
+  handleFile(e.target.files[0]);
+});
+
+uploadZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  uploadZone.classList.add('drag-over');
+});
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('drag-over');
+  handleFile(e.dataTransfer.files[0]);
+});
+
+function handleFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  selectedFile = file;
+  const url = URL.createObjectURL(file);
+  imgPreview.src = url;
+  uploadZone.classList.add('has-image');
+  log(`Image selected: ${file.name} (${(file.size/1024).toFixed(1)} KB)`);
+}
+
+// ============================================================
+// Advanced Panel
+// ============================================================
+advToggle.addEventListener('click', () => {
+  advToggle.classList.toggle('open');
+  advPanel.classList.toggle('visible');
+});
+
+resSlider.addEventListener('input', () => {
+  resVal.textContent = resSlider.value;
+});
+
+// ============================================================
+// Generate
+// ============================================================
+btnGenerate.addEventListener('click', generateScene);
+
+async function generateScene() {
+  const base = serverUrlEl.value.trim().replace(/\/$/, '');
+  if (!base) { log('Enter server URL first.', 'err'); return; }
+
+  clearLog();
+  plyReady = false;
+  btnDownload.style.display = 'none';
+  btnViewModel.style.display = 'none';
+  btnViewModel.disabled = false;
+  latestPlyBlob = null;
+  vcControls.style.display = 'none';
+
+  // Show progress overlay
+  overlayEl.style.display = 'flex';
+  overlayText.textContent = '';
+  progressWrap.style.display = 'block';
+  progressFill.style.width = '10%';
+  progressLbl.textContent = 'Submitting request…';
+
+  btnGenerate.disabled = true;
+  setStatus('working', 'GENERATING');
+
+  try {
+    // Build form data
+    const fd = new FormData();
+    fd.append('prompt', promptEl.value.trim());
+    fd.append('resolution', resSlider.value);
+    fd.append('use_sharp', useSharp.checked ? 'true' : 'false');
+
+    if (currentMode === 'image' && selectedFile) {
+      fd.append('image', selectedFile);
+    } else if (currentMode === 'pano' && selectedFile) {
+      fd.append('pano_image', selectedFile);
+    } else if (currentMode !== 'text') {
+      log('Please upload an image first.', 'err');
+      resetUI();
+      return;
+    }
+
+    log(`POST ${base}/generate …`, 'info');
+    progressFill.style.width = '30%';
+    progressLbl.textContent = 'Server is generating scene… (may take 1–3 min)';
+
+    // Fake incremental progress while waiting
+    let fakeP = 30;
+    const fakeTimer = setInterval(() => {
+      if (fakeP < 88) {
+        fakeP += Math.random() * 3;
+        progressFill.style.width = `${fakeP.toFixed(0)}%`;
+      }
+    }, 2000);
+
+    const res = await fetch(`${base}/generate`, {
+      method: 'POST',
+      body: fd,
+    });
+
+    clearInterval(fakeTimer);
+    progressFill.style.width = '95%';
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || res.statusText);
+    }
+
+    const data = await res.json();
+    log(`Scene saved on server: ${data.saved_to}`, 'ok');
+
+    // Download PLY
+    progressLbl.textContent = 'Downloading .ply …';
+    log(`GET ${base}/download …`, 'info');
+
+    const plyRes = await fetch(`${base}/download`);
+    if (!plyRes.ok) throw new Error(`Download failed: ${plyRes.statusText}`);
+
+    const blob = await plyRes.blob();
+    log(`Downloaded ${(blob.size / 1024 / 1024).toFixed(2)} MB`, 'ok');
+
+    progressFill.style.width = '100%';
+    progressLbl.textContent = 'Model downloaded. Click View Model to open it.';
+
+    latestPlyBlob = blob;
+    plyReady = true;
+
+    // Setup download button
+    btnDownload.style.display = 'block';
+    btnDownload.onclick = () => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(latestPlyBlob);
+      a.download = 'output.ply';
+      a.click();
+    };
+
+    // Setup view button: open the generated .ply in the right-side viewer on demand.
+    btnViewModel.style.display = 'block';
+    btnViewModel.onclick = viewLatestModel;
+
+    setStatus('online', 'READY');
+    overlayText.textContent = 'Model is ready.\nClick View Model to open it here.';
+    progressWrap.style.display = 'none';
+    log('✓ Scene ready. Click View Model to preview.', 'ok');
+
+  } catch (e) {
+    log(`Error: ${e.message}`, 'err');
+    setStatus('error', 'ERROR');
+    overlayText.textContent = 'Generation failed.\nSee log for details.';
+    progressWrap.style.display = 'none';
+  } finally {
+    btnGenerate.disabled = false;
+  }
+}
+
+async function viewLatestModel() {
+  const base = serverUrlEl.value.trim().replace(/\/$/, '');
+
+  try {
+    btnViewModel.disabled = true;
+    setStatus('working', 'LOADING');
+    overlayEl.style.display = 'flex';
+    overlayText.textContent = 'Loading model into viewer…';
+    progressWrap.style.display = 'none';
+
+    // Prefer the already downloaded blob from generateScene(). If the page was refreshed
+    // or the blob is missing, fetch the current server output again.
+    let blob = latestPlyBlob;
+    if (!blob) {
+      if (!base) throw new Error('No cached model. Please enter server URL first.');
+      log(`GET ${base}/download …`, 'info');
+      const plyRes = await fetch(`${base}/download`);
+      if (!plyRes.ok) throw new Error(`Download failed: ${plyRes.statusText}`);
+      blob = await plyRes.blob();
+      latestPlyBlob = blob;
+      btnDownload.style.display = 'block';
+      btnDownload.onclick = () => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(latestPlyBlob);
+        a.download = 'output.ply';
+        a.click();
+      };
+    }
+
+    const arrayBuffer = await blob.arrayBuffer();
+    await loadPlyIntoViewer(arrayBuffer);
+
+    overlayEl.style.display = 'none';
+    vcControls.style.display = 'flex';
+    setStatus('online', 'READY');
+    log('✓ Model opened in viewer.', 'ok');
+  } catch (e) {
+    log(`View failed: ${e.message}`, 'err');
+    overlayText.textContent = 'Failed to open model.\nSee log for details.';
+    progressWrap.style.display = 'none';
+    setStatus('error', 'ERROR');
+  } finally {
+    btnViewModel.disabled = false;
+  }
+}
+
+function resetUI() {
+  btnGenerate.disabled = false;
+  progressWrap.style.display = 'none';
+  overlayText.textContent = 'Configure your server URL,\nenter a prompt and hit Generate.';
+  setStatus('', 'OFFLINE');
+}
+
+// ============================================================
+// 3D Gaussian Splat Viewer (Three.js point cloud fallback)
+// NOTE: True Gaussian Splat rendering requires a dedicated lib.
+// This renders a point cloud preview from PLY vertex data.
+// For full splat rendering, integrate antimatter15/gsplat.js.
+// ============================================================
+
+const canvas3d    = document.getElementById('canvas-3d');
+let scene, camera, renderer, pointCloud, animFrameId;
+let isDragging = false, dragButton = 0, lastMX = 0, lastMY = 0;
+let camPhi = Math.PI / 4, camTheta = Math.PI / 4, camRadius = 4;
+let camTarget = new THREE.Vector3(0, 0, 0);
+let modelRadius = 4;
+const keysDown = new Set();
+
+function initThree() {
+  if (renderer) { renderer.dispose(); }
+
+  scene    = new THREE.Scene();
+  scene.background = new THREE.Color(0x080b10);
+
+  const w = canvas3d.clientWidth;
+  const h = canvas3d.clientHeight;
+
+  camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 1000);
+  updateCamera();
+
+  renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(w, h, false);
+
+  // Axis helper (subtle)
+  const axes = new THREE.AxesHelper(0.3);
+  axes.material.opacity = 0.2;
+  axes.material.transparent = true;
+  scene.add(axes);
+
+  startRenderLoop();
+  setupMouseControls();
+}
+
+function updateCamera() {
+  const offset = new THREE.Vector3(
+    camRadius * Math.sin(camTheta) * Math.cos(camPhi),
+    camRadius * Math.sin(camPhi),
+    camRadius * Math.cos(camTheta) * Math.cos(camPhi),
+  );
+  camera.position.copy(camTarget).add(offset);
+  camera.lookAt(camTarget);
+}
+
+function startRenderLoop() {
+  if (animFrameId) cancelAnimationFrame(animFrameId);
+  function loop() {
+    animFrameId = requestAnimationFrame(loop);
+    updateKeyboardMovement();
+    renderer.render(scene, camera);
+  }
+  loop();
+}
+
+// Parse PLY and build Three.js point cloud
+async function loadPlyIntoViewer(buffer) {
+  initThree();
+
+  const { positions, colors } = parsePly(buffer);
+  if (positions.length === 0) {
+    log('No vertex data found in PLY.', 'err');
+    return;
+  }
+
+  log(`Loaded ${positions.length / 3} points.`, 'info');
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  if (colors.length === positions.length) {
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  }
+  geo.computeBoundingSphere();
+
+  // Normalise scale
+  const r = geo.boundingSphere.radius;
+  const mat = new THREE.PointsMaterial({
+    size: r * 0.006,
+    vertexColors: colors.length > 0,
+    color: colors.length === 0 ? 0x00e5ff : 0xffffff,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.88,
+  });
+
+  if (pointCloud) scene.remove(pointCloud);
+  pointCloud = new THREE.Points(geo, mat);
+
+  // Centre on bounding sphere and auto-frame camera.
+  const centre = geo.boundingSphere.center;
+  pointCloud.position.set(-centre.x, -centre.y, -centre.z);
+  modelRadius = Math.max(r, 0.01);
+  camTarget.set(0, 0, 0);
+  camPhi = Math.PI / 5;
+  camTheta = Math.PI / 4;
+  camRadius = modelRadius * 2.5;
+  updateCamera();
+
+  scene.add(pointCloud);
+}
+
+// Minimal binary/ascii PLY parser (positions + optional RGB)
+function parsePly(buffer) {
+  const positions = [];
+  const colors    = [];
+  const bytes     = new Uint8Array(buffer);
+
+  // Find header end
+  let headerEnd = -1;
+  for (let i = 0; i < bytes.length - 9; i++) {
+    if (bytes[i]===101&&bytes[i+1]===110&&bytes[i+2]===100&&
+        bytes[i+3]===95&&bytes[i+4]===104&&bytes[i+5]===101&&
+        bytes[i+6]===97&&bytes[i+7]===100&&bytes[i+8]===101&&bytes[i+9]===114) {
+      // "end_header"
+      headerEnd = i + 10;
+      // skip newline
+      while (headerEnd < bytes.length && (bytes[headerEnd] === 10 || bytes[headerEnd] === 13))
+        headerEnd++;
+      break;
+    }
+  }
+
+  if (headerEnd === -1) { log('Invalid PLY: no end_header found.', 'err'); return { positions, colors }; }
+
+  const headerText = new TextDecoder().decode(bytes.slice(0, headerEnd));
+
+  // Parse vertex count
+  const vcMatch = headerText.match(/element vertex (\d+)/);
+  if (!vcMatch) return { positions, colors };
+  const vertexCount = parseInt(vcMatch[1]);
+
+  // Detect binary / ascii
+  const isBinaryLE = headerText.includes('format binary_little_endian');
+  const isBinaryBE = headerText.includes('format binary_big_endian');
+
+  // Build property list
+  const propLines = headerText.split('\n').filter(l => l.trim().startsWith('property'));
+  const props = propLines.map(l => {
+    const parts = l.trim().split(/\s+/);
+    return { type: parts[1], name: parts[2] };
+  });
+
+  const typeSizes = { float:4, double:8, uchar:1, uint8:1, int:4, uint:4, short:2, ushort:2 };
+
+  if (isBinaryLE || isBinaryBE) {
+    const view   = new DataView(buffer, headerEnd);
+    const little = isBinaryLE;
+    let   offset = 0;
+
+    const maxPoints = Math.min(vertexCount, 2_000_000); // cap for perf
+
+    for (let i = 0; i < maxPoints; i++) {
+      const vertex = {};
+      for (const p of props) {
+        const sz = typeSizes[p.type] || 4;
+        if (p.type === 'float') {
+          vertex[p.name] = view.getFloat32(offset, little);
+        } else if (p.type === 'double') {
+          vertex[p.name] = view.getFloat64(offset, little);
+        } else if (p.type === 'uchar' || p.type === 'uint8') {
+          vertex[p.name] = view.getUint8(offset);
+        } else if (p.type === 'int') {
+          vertex[p.name] = view.getInt32(offset, little);
+        } else {
+          vertex[p.name] = view.getUint8(offset);
+        }
+        offset += sz;
+      }
+      if (vertex.x !== undefined) {
+        positions.push(vertex.x, vertex.y, vertex.z);
+        if (vertex.red !== undefined) {
+          colors.push(vertex.red / 255, vertex.green / 255, vertex.blue / 255);
+        } else if (vertex.f_dc_0 !== undefined) {
+          // Gaussian splat SH coeff → approximate RGB
+          const SH_C0 = 0.28209479177;
+          const r = Math.min(1, Math.max(0, 0.5 + SH_C0 * vertex.f_dc_0));
+          const g = Math.min(1, Math.max(0, 0.5 + SH_C0 * (vertex.f_dc_1 ?? vertex.f_dc_0)));
+          const b = Math.min(1, Math.max(0, 0.5 + SH_C0 * (vertex.f_dc_2 ?? vertex.f_dc_0)));
+          colors.push(r, g, b);
+        }
+      }
+    }
+  } else {
+    // ASCII
+    const lines = new TextDecoder().decode(bytes.slice(headerEnd)).split('\n');
+    const xI = props.findIndex(p => p.name === 'x');
+    const yI = props.findIndex(p => p.name === 'y');
+    const zI = props.findIndex(p => p.name === 'z');
+    const rI = props.findIndex(p => p.name === 'red');
+    const gI = props.findIndex(p => p.name === 'green');
+    const bI = props.findIndex(p => p.name === 'blue');
+    const maxL = Math.min(lines.length, vertexCount);
+    for (let i = 0; i < maxL; i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      positions.push(+parts[xI], +parts[yI], +parts[zI]);
+      if (rI >= 0) colors.push(+parts[rI] / 255, +parts[gI] / 255, +parts[bI] / 255);
+    }
+  }
+
+  return { positions, colors };
+}
+
+// ============================================================
+// Mouse orbit controls
+// ============================================================
+function setupMouseControls() {
+  const vp = document.getElementById('viewport');
+  if (vp.dataset.controlsReady === '1') return;
+  vp.dataset.controlsReady = '1';
+
+  vp.addEventListener('contextmenu', e => e.preventDefault());
+
+  vp.addEventListener('mousedown', e => {
+    if (!pointCloud) return;
+    isDragging = true;
+    dragButton = e.button;
+    lastMX = e.clientX;
+    lastMY = e.clientY;
+  });
+
+  window.addEventListener('mouseup', () => { isDragging = false; });
+
+  window.addEventListener('mousemove', e => {
+    if (!isDragging || !pointCloud) return;
+    const dx = e.clientX - lastMX;
+    const dy = e.clientY - lastMY;
+
+    if (dragButton === 0) {
+      // Left mouse: orbit / rotate.
+      camTheta -= dx * 0.008;
+      camPhi = Math.max(-1.45, Math.min(1.45, camPhi + dy * 0.008));
+    } else if (dragButton === 2) {
+      // Right mouse: pan in camera plane.
+      panCamera(dx, dy);
+    }
+
+    lastMX = e.clientX;
+    lastMY = e.clientY;
+    updateCamera();
+  });
+
+  vp.addEventListener('wheel', e => {
+    if (!pointCloud) return;
+    e.preventDefault();
+    const zoomScale = 1 + Math.sign(e.deltaY) * 0.08;
+    camRadius = Math.max(modelRadius * 0.03, camRadius * zoomScale);
+    updateCamera();
+  }, { passive: false });
+
+  window.addEventListener('keydown', e => {
+    const tag = (document.activeElement?.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return;
+    keysDown.add(e.key.toLowerCase());
+  });
+  window.addEventListener('keyup', e => keysDown.delete(e.key.toLowerCase()));
+
+  // Touch: one finger orbit, two fingers zoom.
+  let lastTouchDist = 0;
+  vp.addEventListener('touchstart', e => {
+    if (!pointCloud) return;
+    if (e.touches.length === 1) {
+      isDragging = true;
+      dragButton = 0;
+      lastMX = e.touches[0].clientX;
+      lastMY = e.touches[0].clientY;
+    }
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      lastTouchDist = Math.hypot(dx, dy);
+    }
+  });
+  vp.addEventListener('touchend', () => { isDragging = false; });
+  vp.addEventListener('touchmove', e => {
+    if (!pointCloud) return;
+    e.preventDefault();
+    if (e.touches.length === 1 && isDragging) {
+      const dx = e.touches[0].clientX - lastMX;
+      const dy = e.touches[0].clientY - lastMY;
+      camTheta -= dx * 0.008;
+      camPhi = Math.max(-1.45, Math.min(1.45, camPhi + dy * 0.008));
+      lastMX = e.touches[0].clientX;
+      lastMY = e.touches[0].clientY;
+      updateCamera();
+    }
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      camRadius = Math.max(modelRadius * 0.03, camRadius - (dist - lastTouchDist) * modelRadius * 0.003);
+      lastTouchDist = dist;
+      updateCamera();
+    }
+  }, { passive: false });
+}
+
+function panCamera(dx, dy) {
+  const panSpeed = camRadius * 0.0015;
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+  const up = new THREE.Vector3().copy(camera.up).normalize();
+  camTarget.addScaledVector(right, -dx * panSpeed);
+  camTarget.addScaledVector(up, dy * panSpeed);
+}
+
+function updateKeyboardMovement() {
+  if (!pointCloud || keysDown.size === 0) return;
+
+  const baseSpeed = modelRadius * (keysDown.has('shift') ? 0.045 : 0.015);
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  forward.y = 0;
+  if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
+  forward.normalize();
+
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+  const move = new THREE.Vector3();
+
+  if (keysDown.has('w')) move.add(forward);
+  if (keysDown.has('s')) move.sub(forward);
+  if (keysDown.has('d')) move.add(right);
+  if (keysDown.has('a')) move.sub(right);
+  if (keysDown.has('e')) move.y += 1;
+  if (keysDown.has('q')) move.y -= 1;
+
+  if (move.lengthSq() > 0) {
+    move.normalize().multiplyScalar(baseSpeed);
+    camTarget.add(move);
+    updateCamera();
+  }
+}
+
+// ============================================================
+// Viewport Controls
+// ============================================================
+document.getElementById('btn-reset-cam').addEventListener('click', () => {
+  camTarget.set(0, 0, 0);
+  camPhi = Math.PI / 5;
+  camTheta = Math.PI / 4;
+  camRadius = modelRadius * 2.5;
+  updateCamera();
+});
+
+document.getElementById('btn-fullscreen').addEventListener('click', () => {
+  const vp = document.getElementById('viewport');
+  if (!document.fullscreenElement) vp.requestFullscreen();
+  else document.exitFullscreen();
+});
+
+// ============================================================
+// Resize
+// ============================================================
+window.addEventListener('resize', () => {
+  if (!renderer) return;
+  const w = canvas3d.clientWidth;
+  const h = canvas3d.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+});
+
+// ============================================================
+// Init
+// ============================================================
+initThree();
+
+// Auto-ping if default server set
+if (SERVER_DEFAULT) setTimeout(ping, 500);
+</script>
+</body>
+</html>
