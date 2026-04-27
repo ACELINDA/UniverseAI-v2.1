@@ -9,8 +9,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet" />
 
-  <!-- three.js + gaussian splat viewer (via CDN) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- three.js + gaussian splat viewer (via CDN)
+       Important: do NOT also load the old global three.min.js here.
+       GaussianSplats3D imports THREE as an ES module, so this page also uses
+       the same module instance to avoid multiple-THREE viewer bugs. -->
   <script type="importmap">
     {
       "imports": {
@@ -710,7 +712,10 @@
 
 </div>
 
-<script>
+<script type="module">
+import * as THREE from 'three';
+window.THREE = THREE;
+
 // ============================================================
 // CONFIG — change SERVER_DEFAULT to your AutoDL public address
 // ============================================================
