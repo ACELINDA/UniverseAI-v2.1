@@ -664,6 +664,11 @@
           <input type="range" id="cam-distance" min="0.25" max="5" step="0.05" value="1.1" />
           <span id="cam-distance-val">1.10×</span>
         </div>
+        <div class="camera-row">
+          <label for="move-speed">SPEED</label>
+          <input type="range" id="move-speed" min="0.05" max="2" step="0.05" value="0.30" />
+          <span id="move-speed-val">0.30×</span>
+        </div>
       </div>
       <button class="vc-btn" id="btn-reset-cam">RESET CAM</button>
       <button class="vc-btn" id="btn-fullscreen">⛶ FULLSCREEN</button>
@@ -684,7 +689,7 @@ const SERVER_DEFAULT = '';   // e.g. 'http://123.45.67.89:8000'
 let currentMode   = 'text';    // 'text' | 'image' | 'pano'
 let selectedFile  = null;
 let plyReady      = false;
-let latestPlyBlob = null;
+let latestPlyDownloadUrl = null;
 let splatRenderer = null;
 
 // ============================================================
@@ -719,6 +724,8 @@ const camFovSlider = document.getElementById('cam-fov');
 const camFovVal    = document.getElementById('cam-fov-val');
 const camDistSlider = document.getElementById('cam-distance');
 const camDistVal    = document.getElementById('cam-distance-val');
+const moveSpeedSlider = document.getElementById('move-speed');
+const moveSpeedVal    = document.getElementById('move-speed-val');
 
 if (SERVER_DEFAULT) serverUrlEl.value = SERVER_DEFAULT;
 
@@ -839,7 +846,7 @@ async function generateScene() {
   btnDownload.style.display = 'none';
   btnViewModel.style.display = 'none';
   btnViewModel.disabled = false;
-  latestPlyBlob = null;
+  latestPlyDownloadUrl = null;
   vcControls.style.display = 'none';
 
   // Show progress overlay
@@ -898,36 +905,31 @@ async function generateScene() {
     const data = await res.json();
     log(`Scene saved on server: ${data.saved_to}`, 'ok');
 
-    // Download PLY
-    progressLbl.textContent = 'Downloading .ply …';
-    log(`GET ${base}/download …`, 'info');
-
-    const plyRes = await fetch(`${base}/download`);
-    if (!plyRes.ok) throw new Error(`Download failed: ${plyRes.statusText}`);
-
-    const blob = await plyRes.blob();
-    log(`Downloaded ${(blob.size / 1024 / 1024).toFixed(2)} MB`, 'ok');
+    // Prepare PLY URL. Do not fetch as blob here: the viewer loads it with a streaming parser
+    // so large .ply files do not sit in JS memory as Blob + ArrayBuffer duplicates.
+    latestPlyDownloadUrl = `${base}/download`;
+    plyReady = true;
 
     progressFill.style.width = '100%';
     progressLbl.textContent = 'Opening model in viewer…';
 
-    latestPlyBlob = blob;
-    plyReady = true;
-
-    // Setup download button
+    // Setup download button as a normal browser download. This avoids reading the file into JS memory.
     btnDownload.style.display = 'block';
     btnDownload.onclick = () => {
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(latestPlyBlob);
+      a.href = `${latestPlyDownloadUrl}?download_ts=${Date.now()}`;
       a.download = 'output.ply';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
       a.click();
+      a.remove();
     };
 
     // Keep View Model as a manual reload button, but also open automatically now.
     btnViewModel.style.display = 'block';
     btnViewModel.onclick = viewLatestModel;
 
-    log('✓ Scene ready. Opening model automatically…', 'ok');
+    log('✓ Scene ready. Streaming model into viewer automatically…', 'ok');
     await viewLatestModel({ auto: true });
 
   } catch (e) {
@@ -947,35 +949,39 @@ async function viewLatestModel(options = {}) {
     btnViewModel.disabled = true;
     setStatus('working', 'LOADING');
     overlayEl.style.display = 'flex';
-    overlayText.textContent = 'Loading model into viewer…';
-    progressWrap.style.display = 'none';
+    overlayText.textContent = 'Streaming model into viewer…';
+    progressWrap.style.display = 'block';
+    progressFill.style.width = '0%';
+    progressLbl.textContent = 'Starting stream…';
 
-    // Prefer the already downloaded blob from generateScene(). If the page was refreshed
-    // or the blob is missing, fetch the current server output again.
-    let blob = latestPlyBlob;
-    if (!blob) {
-      if (!base) throw new Error('No cached model. Please enter server URL first.');
-      log(`GET ${base}/download …`, 'info');
-      const plyRes = await fetch(`${base}/download`);
-      if (!plyRes.ok) throw new Error(`Download failed: ${plyRes.statusText}`);
-      blob = await plyRes.blob();
-      latestPlyBlob = blob;
-      btnDownload.style.display = 'block';
-      btnDownload.onclick = () => {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(latestPlyBlob);
-        a.download = 'output.ply';
-        a.click();
-      };
+    // Stream the current server output directly into typed arrays.
+    // This avoids the high-memory blob() + arrayBuffer() path.
+    if (!latestPlyDownloadUrl) {
+      if (!base) throw new Error('No model URL. Please enter server URL first.');
+      latestPlyDownloadUrl = `${base}/download`;
     }
 
-    const arrayBuffer = await blob.arrayBuffer();
-    await loadPlyIntoViewer(arrayBuffer);
+    btnDownload.style.display = 'block';
+    btnDownload.onclick = () => {
+      const a = document.createElement('a');
+      a.href = `${latestPlyDownloadUrl}?download_ts=${Date.now()}`;
+      a.download = 'output.ply';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    };
+
+    await loadPlyUrlIntoViewer(`${latestPlyDownloadUrl}?view_ts=${Date.now()}`, (pct, msg) => {
+      progressFill.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(0)}%`;
+      progressLbl.textContent = msg || 'Streaming .ply …';
+    });
 
     overlayEl.style.display = 'none';
+    progressWrap.style.display = 'none';
     vcControls.style.display = 'flex';
     setStatus('online', 'READY');
-    log(options.auto ? '✓ Model opened automatically in viewer.' : '✓ Model opened in viewer.', 'ok');
+    log(options.auto ? '✓ Model streamed and opened automatically in viewer.' : '✓ Model streamed and opened in viewer.', 'ok');
   } catch (e) {
     log(`View failed: ${e.message}`, 'err');
     overlayText.textContent = 'Failed to open model.\nSee log for details.';
@@ -1008,6 +1014,8 @@ let camTarget = new THREE.Vector3(0, 0, 0);
 let modelRadius = 4;
 const DEFAULT_CAM_DISTANCE_MULT = 1.1;
 const DEFAULT_CAM_FOV = 60;
+const DEFAULT_MOVE_SPEED_MULT = 0.30;
+let moveSpeedMult = DEFAULT_MOVE_SPEED_MULT;
 const keysDown = new Set();
 
 function initThree() {
@@ -1056,54 +1064,74 @@ function startRenderLoop() {
   loop();
 }
 
-// Parse PLY and build Three.js point cloud
-async function loadPlyIntoViewer(buffer) {
+// Stream PLY from URL and build Three.js point cloud without creating Blob/ArrayBuffer copies.
+async function loadPlyUrlIntoViewer(url, onProgress) {
   initThree();
 
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Download failed: ${res.statusText}`);
+
+  const contentLength = Number(res.headers.get('content-length') || 0);
+  const data = await parsePlyStream(res, contentLength, onProgress);
+
+  if (data.positions.length === 0) {
+    log('No vertex data found in PLY.', 'err');
+    return;
+  }
+
+  log(`Loaded ${data.positions.length / 3} points.`, 'info');
+  buildPointCloud(data.positions, data.colors);
+}
+
+// Fallback entry kept for compatibility with local ArrayBuffer loading if needed.
+async function loadPlyIntoViewer(buffer) {
+  initThree();
   const { positions, colors } = parsePly(buffer);
   if (positions.length === 0) {
     log('No vertex data found in PLY.', 'err');
     return;
   }
-
   log(`Loaded ${positions.length / 3} points.`, 'info');
+  buildPointCloud(new Float32Array(positions), new Float32Array(colors));
+}
 
+function buildPointCloud(positions, colors) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  if (colors.length === positions.length) {
+  if (colors && colors.length === positions.length) {
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   }
   geo.computeBoundingSphere();
 
-  // Normalise scale
   const r = geo.boundingSphere.radius;
 
-  // Make sure the generated scene is not clipped by the camera frustum.
   camera.near = Math.max(r * 0.001, 0.001);
   camera.far = Math.max(r * 20, 1000);
   camera.updateProjectionMatrix();
+
   const mat = new THREE.PointsMaterial({
     size: Math.max(r * 0.006, 0.01),
-    vertexColors: colors.length > 0,
-    color: colors.length === 0 ? 0x00e5ff : 0xffffff,
+    vertexColors: colors && colors.length === positions.length,
+    color: (!colors || colors.length === 0) ? 0x00e5ff : 0xffffff,
     sizeAttenuation: true,
     transparent: true,
     opacity: 0.88,
   });
 
-  if (pointCloud) scene.remove(pointCloud);
+  if (pointCloud) {
+    scene.remove(pointCloud);
+    pointCloud.geometry.dispose();
+    pointCloud.material.dispose();
+  }
 
-  // Put the geometry center at local origin first, then rotate around X.
-  // This keeps the model centered while fixing the upside-down orientation.
   const centre = geo.boundingSphere.center.clone();
   geo.translate(-centre.x, -centre.y, -centre.z);
   geo.computeBoundingSphere();
 
   pointCloud = new THREE.Points(geo, mat);
   pointCloud.position.set(0, 0, 0);
-  pointCloud.rotation.x = Math.PI; // default: rotate 180° around X so the generated model is upright
+  pointCloud.rotation.x = Math.PI;
 
-  // Auto-frame camera closer to the model.
   modelRadius = Math.max(r, 0.01);
   camTarget.set(0, 0, 0);
   camPhi = Math.PI / 5;
@@ -1116,6 +1144,241 @@ async function loadPlyIntoViewer(buffer) {
   updateCameraPanelUI();
 
   scene.add(pointCloud);
+}
+
+async function parsePlyStream(response, contentLength = 0, onProgress = () => {}) {
+  if (!response.body || !response.body.getReader) {
+    const buffer = await response.arrayBuffer();
+    const parsed = parsePly(buffer);
+    return {
+      positions: new Float32Array(parsed.positions),
+      colors: new Float32Array(parsed.colors),
+    };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let receivedBytes = 0;
+  let pending = new Uint8Array(0);
+  let headerParsed = false;
+  let meta = null;
+  let positions = null;
+  let colors = null;
+  let vertexIndex = 0;
+  let asciiText = '';
+
+  function concatBytes(a, b) {
+    if (!a || a.length === 0) return b;
+    if (!b || b.length === 0) return a;
+    const out = new Uint8Array(a.length + b.length);
+    out.set(a, 0);
+    out.set(b, a.length);
+    return out;
+  }
+
+  function findEndHeader(bytes) {
+    for (let i = 0; i <= bytes.length - 10; i++) {
+      if (bytes[i]===101&&bytes[i+1]===110&&bytes[i+2]===100&&
+          bytes[i+3]===95&&bytes[i+4]===104&&bytes[i+5]===101&&
+          bytes[i+6]===97&&bytes[i+7]===100&&bytes[i+8]===101&&bytes[i+9]===114) {
+        let end = i + 10;
+        while (end < bytes.length && (bytes[end] === 10 || bytes[end] === 13)) end++;
+        return end;
+      }
+    }
+    return -1;
+  }
+
+  function parseHeader(headerBytes) {
+    const headerText = decoder.decode(headerBytes);
+    const vcMatch = headerText.match(/element vertex (\d+)/);
+    if (!vcMatch) throw new Error('Invalid PLY: no vertex count found.');
+
+    const vertexCount = parseInt(vcMatch[1], 10);
+    const isBinaryLE = headerText.includes('format binary_little_endian');
+    const isBinaryBE = headerText.includes('format binary_big_endian');
+    const isAscii = headerText.includes('format ascii');
+
+    const typeSizes = {
+      char:1, uchar:1, int8:1, uint8:1,
+      short:2, ushort:2, int16:2, uint16:2,
+      int:4, uint:4, int32:4, uint32:4,
+      float:4, float32:4, double:8, float64:8,
+    };
+
+    const lines = headerText.split(/\r?\n/);
+    const props = [];
+    let inVertex = false;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (line.startsWith('element vertex')) { inVertex = true; continue; }
+      if (line.startsWith('element ') && !line.startsWith('element vertex')) { inVertex = false; }
+      if (inVertex && line.startsWith('property')) {
+        const parts = line.split(/\s+/);
+        if (parts[1] === 'list') continue;
+        const type = parts[1];
+        const name = parts[2];
+        const size = typeSizes[type] || 4;
+        props.push({ type, name, size, offset: 0 });
+      }
+    }
+
+    let stride = 0;
+    for (const p of props) {
+      p.offset = stride;
+      stride += p.size;
+    }
+
+    const maxPoints = Math.min(vertexCount, 2_000_000);
+    const hasRGB = props.some(p => p.name === 'red') && props.some(p => p.name === 'green') && props.some(p => p.name === 'blue');
+    const hasSH = props.some(p => p.name === 'f_dc_0');
+
+    return { vertexCount, maxPoints, isBinaryLE, isBinaryBE, isAscii, props, stride, hasRGB, hasSH };
+  }
+
+  function readValue(view, byteOffset, prop, little) {
+    switch (prop.type) {
+      case 'float': case 'float32': return view.getFloat32(byteOffset, little);
+      case 'double': case 'float64': return view.getFloat64(byteOffset, little);
+      case 'uchar': case 'uint8': return view.getUint8(byteOffset);
+      case 'char': case 'int8': return view.getInt8(byteOffset);
+      case 'short': case 'int16': return view.getInt16(byteOffset, little);
+      case 'ushort': case 'uint16': return view.getUint16(byteOffset, little);
+      case 'uint': case 'uint32': return view.getUint32(byteOffset, little);
+      case 'int': case 'int32': return view.getInt32(byteOffset, little);
+      default: return view.getFloat32(byteOffset, little);
+    }
+  }
+
+  function parseBinaryVertices(bytes) {
+    const little = meta.isBinaryLE;
+    const stride = meta.stride;
+    const availableVertices = Math.floor(bytes.length / stride);
+    const canRead = Math.min(availableVertices, meta.maxPoints - vertexIndex);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+    const xProp = meta.props.find(p => p.name === 'x');
+    const yProp = meta.props.find(p => p.name === 'y');
+    const zProp = meta.props.find(p => p.name === 'z');
+    const rProp = meta.props.find(p => p.name === 'red');
+    const gProp = meta.props.find(p => p.name === 'green');
+    const bProp = meta.props.find(p => p.name === 'blue');
+    const sh0 = meta.props.find(p => p.name === 'f_dc_0');
+    const sh1 = meta.props.find(p => p.name === 'f_dc_1');
+    const sh2 = meta.props.find(p => p.name === 'f_dc_2');
+    const SH_C0 = 0.28209479177;
+
+    for (let i = 0; i < canRead; i++) {
+      const base = i * stride;
+      const out = vertexIndex * 3;
+      positions[out] = readValue(view, base + xProp.offset, xProp, little);
+      positions[out + 1] = readValue(view, base + yProp.offset, yProp, little);
+      positions[out + 2] = readValue(view, base + zProp.offset, zProp, little);
+
+      if (colors) {
+        if (meta.hasRGB) {
+          colors[out] = readValue(view, base + rProp.offset, rProp, little) / 255;
+          colors[out + 1] = readValue(view, base + gProp.offset, gProp, little) / 255;
+          colors[out + 2] = readValue(view, base + bProp.offset, bProp, little) / 255;
+        } else if (meta.hasSH) {
+          const rr = readValue(view, base + sh0.offset, sh0, little);
+          const gg = sh1 ? readValue(view, base + sh1.offset, sh1, little) : rr;
+          const bb = sh2 ? readValue(view, base + sh2.offset, sh2, little) : rr;
+          colors[out] = Math.min(1, Math.max(0, 0.5 + SH_C0 * rr));
+          colors[out + 1] = Math.min(1, Math.max(0, 0.5 + SH_C0 * gg));
+          colors[out + 2] = Math.min(1, Math.max(0, 0.5 + SH_C0 * bb));
+        }
+      }
+      vertexIndex++;
+    }
+
+    const consumed = canRead * stride;
+    return bytes.slice(consumed);
+  }
+
+  function parseAsciiLines(final = false) {
+    const lines = asciiText.split(/\r?\n/);
+    if (!final) asciiText = lines.pop() || '';
+    else asciiText = '';
+
+    const xI = meta.props.findIndex(p => p.name === 'x');
+    const yI = meta.props.findIndex(p => p.name === 'y');
+    const zI = meta.props.findIndex(p => p.name === 'z');
+    const rI = meta.props.findIndex(p => p.name === 'red');
+    const gI = meta.props.findIndex(p => p.name === 'green');
+    const bI = meta.props.findIndex(p => p.name === 'blue');
+
+    for (const line of lines) {
+      if (vertexIndex >= meta.maxPoints) break;
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      const out = vertexIndex * 3;
+      positions[out] = Number(parts[xI]);
+      positions[out + 1] = Number(parts[yI]);
+      positions[out + 2] = Number(parts[zI]);
+      if (colors && rI >= 0) {
+        colors[out] = Number(parts[rI]) / 255;
+        colors[out + 1] = Number(parts[gI]) / 255;
+        colors[out + 2] = Number(parts[bI]) / 255;
+      }
+      vertexIndex++;
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    receivedBytes += value.byteLength;
+    pending = concatBytes(pending, value);
+
+    if (!headerParsed) {
+      const headerEnd = findEndHeader(pending);
+      if (headerEnd < 0) {
+        const pct = contentLength ? (receivedBytes / contentLength) * 15 : 5;
+        onProgress(pct, 'Reading .ply header…');
+        continue;
+      }
+
+      meta = parseHeader(pending.slice(0, headerEnd));
+      if (!meta.props.some(p => p.name === 'x') || !meta.props.some(p => p.name === 'y') || !meta.props.some(p => p.name === 'z')) {
+        throw new Error('Invalid PLY: missing x/y/z vertex properties.');
+      }
+      positions = new Float32Array(meta.maxPoints * 3);
+      colors = (meta.hasRGB || meta.hasSH) ? new Float32Array(meta.maxPoints * 3) : new Float32Array(0);
+      pending = pending.slice(headerEnd);
+      headerParsed = true;
+      log(`Streaming ${meta.vertexCount.toLocaleString()} vertices${meta.maxPoints < meta.vertexCount ? `, preview cap ${meta.maxPoints.toLocaleString()}` : ''}.`, 'info');
+      onProgress(10, 'PLY header loaded…');
+    }
+
+    if (meta.isBinaryLE || meta.isBinaryBE) {
+      pending = parseBinaryVertices(pending);
+    } else if (meta.isAscii) {
+      asciiText += decoder.decode(pending, { stream: true });
+      pending = new Uint8Array(0);
+      parseAsciiLines(false);
+    } else {
+      throw new Error('Unsupported PLY format.');
+    }
+
+    const pctByBytes = contentLength ? (receivedBytes / contentLength) * 100 : 10 + (vertexIndex / meta.maxPoints) * 85;
+    onProgress(Math.min(99, pctByBytes), `Streaming .ply ${vertexIndex.toLocaleString()} / ${meta.maxPoints.toLocaleString()} points…`);
+
+    if (vertexIndex >= meta.maxPoints) {
+      try { await reader.cancel(); } catch (_) {}
+      break;
+    }
+  }
+
+  if (!headerParsed) throw new Error('Invalid PLY: no end_header found.');
+  if (meta.isAscii && asciiText) parseAsciiLines(true);
+
+  onProgress(100, 'Building viewer geometry…');
+  const used = vertexIndex * 3;
+  return {
+    positions: positions.subarray(0, used),
+    colors: colors && colors.length ? colors.subarray(0, used) : new Float32Array(0),
+  };
 }
 
 // Minimal binary/ascii PLY parser (positions + optional RGB)
@@ -1248,7 +1511,7 @@ function setupMouseControls() {
     if (dragButton === 0) {
       // Left mouse: orbit / rotate.
       camTheta -= dx * 0.008;
-      camPhi = Math.max(-1.45, Math.min(1.45, camPhi + dy * 0.008));
+      camPhi += dy * 0.008;
     } else if (dragButton === 2) {
       // Right mouse: pan in camera plane.
       panCamera(dx, dy);
@@ -1299,7 +1562,7 @@ function setupMouseControls() {
       const dx = e.touches[0].clientX - lastMX;
       const dy = e.touches[0].clientY - lastMY;
       camTheta -= dx * 0.008;
-      camPhi = Math.max(-1.45, Math.min(1.45, camPhi + dy * 0.008));
+      camPhi += dy * 0.008;
       lastMX = e.touches[0].clientX;
       lastMY = e.touches[0].clientY;
       updateCamera();
@@ -1329,7 +1592,10 @@ function panCamera(dx, dy) {
 function updateKeyboardMovement() {
   if (!pointCloud || keysDown.size === 0) return;
 
-  const baseSpeed = modelRadius * (keysDown.has('shift') ? 0.045 : 0.015);
+  // Scene scale is usually small, so the default movement is intentionally slow.
+  // The SPEED slider multiplies this base movement; holding Shift keeps the original fast-move behavior.
+  const normalSpeed = modelRadius * 0.005 * moveSpeedMult;
+  const baseSpeed = keysDown.has('shift') ? normalSpeed * 3 : normalSpeed;
   const forward = new THREE.Vector3();
   camera.getWorldDirection(forward);
   forward.y = 0;
@@ -1367,6 +1633,9 @@ function updateCameraPanelUI() {
   const distMult = modelRadius > 0 ? camRadius / modelRadius : DEFAULT_CAM_DISTANCE_MULT;
   camDistSlider.value = String(Math.max(0.25, Math.min(5, distMult)).toFixed(2));
   camDistVal.textContent = `${Number(camDistSlider.value).toFixed(2)}×`;
+
+  moveSpeedSlider.value = String(moveSpeedMult.toFixed(2));
+  moveSpeedVal.textContent = `${moveSpeedMult.toFixed(2)}×`;
 }
 
 camFovSlider.addEventListener('input', () => {
@@ -1379,6 +1648,11 @@ camFovSlider.addEventListener('input', () => {
 camDistSlider.addEventListener('input', () => {
   setCameraDistanceMultiplier(camDistSlider.value);
   camDistVal.textContent = `${Number(camDistSlider.value).toFixed(2)}×`;
+});
+
+moveSpeedSlider.addEventListener('input', () => {
+  moveSpeedMult = Math.max(0.05, Math.min(2, Number(moveSpeedSlider.value) || DEFAULT_MOVE_SPEED_MULT));
+  moveSpeedVal.textContent = `${moveSpeedMult.toFixed(2)}×`;
 });
 
 // ============================================================
