@@ -11,6 +11,13 @@
 
   <!-- three.js + gaussian splat viewer (via CDN) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js"
+      }
+    }
+  </script>
 
   <style>
     /* ── Reset & Variables ── */
@@ -1000,14 +1007,15 @@ function resetUI() {
 }
 
 // ============================================================
-// 3D Gaussian Splat Viewer (Three.js point cloud fallback)
-// NOTE: True Gaussian Splat rendering requires a dedicated lib.
-// This renders a point cloud preview from PLY vertex data.
-// For full splat rendering, integrate antimatter15/gsplat.js.
+// 3D Gaussian Splat Viewer
+// Uses @mkkellogg/gaussian-splats-3d to render real 3D Gaussian splats
+// from the backend .ply, not a normal THREE.Points point cloud preview.
 // ============================================================
 
 const canvas3d    = document.getElementById('canvas-3d');
-let scene, camera, renderer, pointCloud, animFrameId;
+let scene, camera, renderer, pointCloud, gaussianSplatViewer, animFrameId;
+let modelLoaded = false;
+let gaussianSplats3DModulePromise = null;
 let isDragging = false, dragButton = 0, lastMX = 0, lastMY = 0;
 let camPhi = Math.PI / 4, camTheta = Math.PI / 4, camRadius = 4;
 let camTarget = new THREE.Vector3(0, 0, 0);
@@ -1059,28 +1067,349 @@ function startRenderLoop() {
   function loop() {
     animFrameId = requestAnimationFrame(loop);
     updateKeyboardMovement();
+    if (gaussianSplatViewer && typeof gaussianSplatViewer.update === 'function') {
+      gaussianSplatViewer.update(camera, renderer);
+    }
     renderer.render(scene, camera);
   }
   loop();
 }
 
-// Stream PLY from URL and build Three.js point cloud without creating Blob/ArrayBuffer copies.
+// Stream PLY from URL and build a real 3D Gaussian Splat scene.
+// The viewer loads the .ply from URL progressively; we only make a lightweight
+// streaming pass first to compute bounds for auto-centering / camera framing.
 async function loadPlyUrlIntoViewer(url, onProgress) {
   initThree();
 
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`Download failed: ${res.statusText}`);
+  onProgress?.(3, 'Loading 3DGS renderer …');
+  const GaussianSplats3D = await getGaussianSplats3D();
 
-  const contentLength = Number(res.headers.get('content-length') || 0);
-  const data = await parsePlyStream(res, contentLength, onProgress);
+  onProgress?.(8, 'Reading model bounds …');
+  const bounds = await computePlyBoundsFromUrl(url, (pct, msg) => {
+    onProgress?.(8 + pct * 0.22, msg || 'Reading model bounds …');
+  });
 
-  if (data.positions.length === 0) {
-    log('No vertex data found in PLY.', 'err');
-    return;
+  onProgress?.(32, 'Loading Gaussian splats …');
+  await buildGaussianSplatScene(url, bounds, GaussianSplats3D, (pct, msg) => {
+    onProgress?.(32 + pct * 0.68, msg || 'Loading Gaussian splats …');
+  });
+}
+
+async function getGaussianSplats3D() {
+  if (!gaussianSplats3DModulePromise) {
+    gaussianSplats3DModulePromise = import('https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js');
+  }
+  return gaussianSplats3DModulePromise;
+}
+
+async function buildGaussianSplatScene(url, bounds, GaussianSplats3D, onProgress = () => {}) {
+  cleanupCurrentModel();
+
+  const center = bounds?.center || { x: 0, y: 0, z: 0 };
+  const radius = Math.max(bounds?.radius || 1, 0.01);
+
+  modelRadius = radius;
+  camTarget.set(0, 0, 0);
+  camPhi = Math.PI / 5;
+  camTheta = Math.PI / 4;
+  camera.fov = DEFAULT_CAM_FOV;
+  camera.near = Math.max(modelRadius * 0.001, 0.001);
+  camera.far = Math.max(modelRadius * 40, 1000);
+  camera.updateProjectionMatrix();
+  setCameraDistanceMultiplier(DEFAULT_CAM_DISTANCE_MULT);
+  updateCameraPanelUI();
+  updateCamera();
+
+  // Default upright orientation: rotate the 3DGS model 180° around X.
+  // Translation is -R(center), so the model stays centered after rotation.
+  const rotationX180 = [1, 0, 0, 0];
+  const centeredPositionAfterX180 = [-center.x, center.y, center.z];
+
+  gaussianSplatViewer = new GaussianSplats3D.DropInViewer({
+    gpuAcceleratedSort: true,
+    sharedMemoryForWorkers: false,
+    integerBasedSort: false,
+    dynamicScene: true,
+    enableOptionalEffects: false,
+  });
+
+  scene.add(gaussianSplatViewer);
+
+  const sceneOptions = {
+    splatAlphaRemovalThreshold: 5,
+    showLoadingUI: false,
+    progressiveLoad: true,
+    position: centeredPositionAfterX180,
+    rotation: rotationX180,
+    scale: [1, 1, 1],
+    onProgress: (percent) => {
+      const p = typeof percent === 'number' ? percent : 0;
+      onProgress(Math.max(0, Math.min(100, p)), 'Loading Gaussian splats …');
+    },
+  };
+
+  if (GaussianSplats3D.SceneFormat && GaussianSplats3D.SceneFormat.Ply !== undefined) {
+    sceneOptions.format = GaussianSplats3D.SceneFormat.Ply;
   }
 
-  log(`Loaded ${data.positions.length / 3} points.`, 'info');
-  buildPointCloud(data.positions, data.colors);
+  if (typeof gaussianSplatViewer.addSplatScene === 'function') {
+    await gaussianSplatViewer.addSplatScene(url, sceneOptions);
+  } else {
+    await gaussianSplatViewer.addSplatScenes([{ path: url, ...sceneOptions }]);
+  }
+
+  modelLoaded = true;
+  pointCloud = null;
+  onProgress(100, 'Gaussian splat model ready.');
+}
+
+function cleanupCurrentModel() {
+  modelLoaded = false;
+
+  if (gaussianSplatViewer) {
+    scene.remove(gaussianSplatViewer);
+    if (typeof gaussianSplatViewer.dispose === 'function') {
+      try { gaussianSplatViewer.dispose(); } catch (_) {}
+    }
+    gaussianSplatViewer = null;
+  }
+
+  if (pointCloud) {
+    scene.remove(pointCloud);
+    if (pointCloud.geometry) pointCloud.geometry.dispose();
+    if (pointCloud.material) pointCloud.material.dispose();
+    pointCloud = null;
+  }
+}
+
+async function computePlyBoundsFromUrl(url, onProgress = () => {}) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Download failed while reading bounds: ${res.statusText}`);
+
+  const contentLength = Number(res.headers.get('content-length') || 0);
+
+  if (!res.body || !res.body.getReader) {
+    const buffer = await res.arrayBuffer();
+    return computePlyBoundsFromBuffer(buffer);
+  }
+
+  const reader = res.body.getReader();
+  let receivedBytes = 0;
+  let pending = new Uint8Array(0);
+  let headerParsed = false;
+  let meta = null;
+  let vertexIndex = 0;
+  let asciiTail = '';
+
+  const bounds = {
+    minX: Infinity, minY: Infinity, minZ: Infinity,
+    maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity,
+  };
+
+  const concatBytes = (a, b) => {
+    if (!a || a.length === 0) return b;
+    if (!b || b.length === 0) return a;
+    const out = new Uint8Array(a.length + b.length);
+    out.set(a, 0);
+    out.set(b, a.length);
+    return out;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    receivedBytes += value.byteLength;
+    pending = concatBytes(pending, value);
+
+    if (!headerParsed) {
+      const headerEnd = findPlyHeaderEnd(pending);
+      if (headerEnd < 0) continue;
+      meta = parsePlyHeaderForBounds(pending.slice(0, headerEnd));
+      pending = pending.slice(headerEnd);
+      headerParsed = true;
+      if (!meta.xProp || !meta.yProp || !meta.zProp) throw new Error('Invalid PLY: missing x/y/z properties.');
+    }
+
+    if (meta.isBinaryLE || meta.isBinaryBE) {
+      const little = meta.isBinaryLE;
+      const completeBytes = Math.floor(pending.length / meta.stride) * meta.stride;
+      if (completeBytes > 0) {
+        const view = new DataView(pending.buffer, pending.byteOffset, completeBytes);
+        const completeVertices = completeBytes / meta.stride;
+        for (let i = 0; i < completeVertices && vertexIndex < meta.vertexCount; i++, vertexIndex++) {
+          const base = i * meta.stride;
+          const x = readPlyNumber(view, base + meta.xProp.offset, meta.xProp.type, little);
+          const y = readPlyNumber(view, base + meta.yProp.offset, meta.yProp.type, little);
+          const z = readPlyNumber(view, base + meta.zProp.offset, meta.zProp.type, little);
+          updateBounds(bounds, x, y, z);
+        }
+        pending = pending.slice(completeBytes);
+      }
+    } else if (meta.isAscii) {
+      const text = asciiTail + new TextDecoder().decode(pending, { stream: true });
+      const lines = text.split(/\r?\n/);
+      asciiTail = lines.pop() || '';
+      for (const line of lines) {
+        if (vertexIndex >= meta.vertexCount) break;
+        const parts = line.trim().split(/\s+/);
+        if (parts.length <= Math.max(meta.xIndex, meta.yIndex, meta.zIndex)) continue;
+        updateBounds(bounds, +parts[meta.xIndex], +parts[meta.yIndex], +parts[meta.zIndex]);
+        vertexIndex++;
+      }
+      pending = new Uint8Array(0);
+    }
+
+    const pct = contentLength ? (receivedBytes / contentLength) * 100 : Math.min(99, (vertexIndex / Math.max(meta?.vertexCount || 1, 1)) * 100);
+    onProgress(pct, `Reading bounds ${Math.min(100, pct).toFixed(0)}%`);
+
+    if (meta && vertexIndex >= meta.vertexCount) break;
+  }
+
+  if (meta?.isAscii && asciiTail && vertexIndex < meta.vertexCount) {
+    const parts = asciiTail.trim().split(/\s+/);
+    if (parts.length > Math.max(meta.xIndex, meta.yIndex, meta.zIndex)) {
+      updateBounds(bounds, +parts[meta.xIndex], +parts[meta.yIndex], +parts[meta.zIndex]);
+    }
+  }
+
+  if (!isFinite(bounds.minX)) throw new Error('Could not compute model bounds from PLY.');
+  return finalizeBounds(bounds);
+}
+
+function computePlyBoundsFromBuffer(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const headerEnd = findPlyHeaderEnd(bytes);
+  if (headerEnd < 0) throw new Error('Invalid PLY: no end_header found.');
+  const meta = parsePlyHeaderForBounds(bytes.slice(0, headerEnd));
+  const bounds = {
+    minX: Infinity, minY: Infinity, minZ: Infinity,
+    maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity,
+  };
+
+  if (meta.isBinaryLE || meta.isBinaryBE) {
+    const little = meta.isBinaryLE;
+    const view = new DataView(buffer, headerEnd);
+    for (let i = 0; i < meta.vertexCount; i++) {
+      const base = i * meta.stride;
+      const x = readPlyNumber(view, base + meta.xProp.offset, meta.xProp.type, little);
+      const y = readPlyNumber(view, base + meta.yProp.offset, meta.yProp.type, little);
+      const z = readPlyNumber(view, base + meta.zProp.offset, meta.zProp.type, little);
+      updateBounds(bounds, x, y, z);
+    }
+  } else {
+    const text = new TextDecoder().decode(bytes.slice(headerEnd));
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < Math.min(lines.length, meta.vertexCount); i++) {
+      const parts = lines[i].trim().split(/\s+/);
+      if (parts.length <= Math.max(meta.xIndex, meta.yIndex, meta.zIndex)) continue;
+      updateBounds(bounds, +parts[meta.xIndex], +parts[meta.yIndex], +parts[meta.zIndex]);
+    }
+  }
+
+  return finalizeBounds(bounds);
+}
+
+function findPlyHeaderEnd(bytes) {
+  for (let i = 0; i <= bytes.length - 10; i++) {
+    if (bytes[i]===101&&bytes[i+1]===110&&bytes[i+2]===100&&
+        bytes[i+3]===95&&bytes[i+4]===104&&bytes[i+5]===101&&
+        bytes[i+6]===97&&bytes[i+7]===100&&bytes[i+8]===101&&bytes[i+9]===114) {
+      let end = i + 10;
+      while (end < bytes.length && (bytes[end] === 10 || bytes[end] === 13)) end++;
+      return end;
+    }
+  }
+  return -1;
+}
+
+function parsePlyHeaderForBounds(headerBytes) {
+  const headerText = new TextDecoder().decode(headerBytes);
+  const vcMatch = headerText.match(/element vertex (\d+)/);
+  if (!vcMatch) throw new Error('Invalid PLY: no vertex count found.');
+
+  const vertexCount = parseInt(vcMatch[1], 10);
+  const isBinaryLE = headerText.includes('format binary_little_endian');
+  const isBinaryBE = headerText.includes('format binary_big_endian');
+  const isAscii = headerText.includes('format ascii');
+
+  const typeSizes = {
+    char:1, uchar:1, int8:1, uint8:1,
+    short:2, ushort:2, int16:2, uint16:2,
+    int:4, uint:4, int32:4, uint32:4,
+    float:4, float32:4, double:8, float64:8,
+  };
+
+  const lines = headerText.split(/\r?\n/);
+  const props = [];
+  let inVertex = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith('element vertex')) { inVertex = true; continue; }
+    if (line.startsWith('element ') && !line.startsWith('element vertex')) { inVertex = false; }
+    if (inVertex && line.startsWith('property')) {
+      const parts = line.split(/\s+/);
+      if (parts[1] === 'list') continue;
+      const type = parts[1];
+      const name = parts[2];
+      const size = typeSizes[type] || 4;
+      props.push({ type, name, size, offset: 0 });
+    }
+  }
+
+  let stride = 0;
+  for (const p of props) {
+    p.offset = stride;
+    stride += p.size;
+  }
+
+  const xProp = props.find(p => p.name === 'x');
+  const yProp = props.find(p => p.name === 'y');
+  const zProp = props.find(p => p.name === 'z');
+
+  return {
+    vertexCount, isBinaryLE, isBinaryBE, isAscii, props, stride, xProp, yProp, zProp,
+    xIndex: props.findIndex(p => p.name === 'x'),
+    yIndex: props.findIndex(p => p.name === 'y'),
+    zIndex: props.findIndex(p => p.name === 'z'),
+  };
+}
+
+function readPlyNumber(view, offset, type, little) {
+  switch (type) {
+    case 'char': case 'int8': return view.getInt8(offset);
+    case 'uchar': case 'uint8': return view.getUint8(offset);
+    case 'short': case 'int16': return view.getInt16(offset, little);
+    case 'ushort': case 'uint16': return view.getUint16(offset, little);
+    case 'int': case 'int32': return view.getInt32(offset, little);
+    case 'uint': case 'uint32': return view.getUint32(offset, little);
+    case 'double': case 'float64': return view.getFloat64(offset, little);
+    case 'float': case 'float32':
+    default: return view.getFloat32(offset, little);
+  }
+}
+
+function updateBounds(bounds, x, y, z) {
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+  bounds.minX = Math.min(bounds.minX, x);
+  bounds.minY = Math.min(bounds.minY, y);
+  bounds.minZ = Math.min(bounds.minZ, z);
+  bounds.maxX = Math.max(bounds.maxX, x);
+  bounds.maxY = Math.max(bounds.maxY, y);
+  bounds.maxZ = Math.max(bounds.maxZ, z);
+}
+
+function finalizeBounds(bounds) {
+  const center = {
+    x: (bounds.minX + bounds.maxX) * 0.5,
+    y: (bounds.minY + bounds.maxY) * 0.5,
+    z: (bounds.minZ + bounds.maxZ) * 0.5,
+  };
+  const dx = bounds.maxX - bounds.minX;
+  const dy = bounds.maxY - bounds.minY;
+  const dz = bounds.maxZ - bounds.minZ;
+  const radius = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz) * 0.5, 0.01);
+  return { center, radius, bounds };
 }
 
 // Fallback entry kept for compatibility with local ArrayBuffer loading if needed.
@@ -1144,6 +1473,7 @@ function buildPointCloud(positions, colors) {
   updateCameraPanelUI();
 
   scene.add(pointCloud);
+  modelLoaded = true;
 }
 
 async function parsePlyStream(response, contentLength = 0, onProgress = () => {}) {
@@ -1494,7 +1824,7 @@ function setupMouseControls() {
   vp.addEventListener('contextmenu', e => e.preventDefault());
 
   vp.addEventListener('mousedown', e => {
-    if (!pointCloud) return;
+    if (!modelLoaded) return;
     isDragging = true;
     dragButton = e.button;
     lastMX = e.clientX;
@@ -1504,7 +1834,7 @@ function setupMouseControls() {
   window.addEventListener('mouseup', () => { isDragging = false; });
 
   window.addEventListener('mousemove', e => {
-    if (!isDragging || !pointCloud) return;
+    if (!isDragging || !modelLoaded) return;
     const dx = e.clientX - lastMX;
     const dy = e.clientY - lastMY;
 
@@ -1523,7 +1853,7 @@ function setupMouseControls() {
   });
 
   vp.addEventListener('wheel', e => {
-    if (!pointCloud) return;
+    if (!modelLoaded) return;
     e.preventDefault();
     const zoomScale = 1 + Math.sign(e.deltaY) * 0.08;
     camRadius = Math.max(modelRadius * 0.03, camRadius * zoomScale);
@@ -1541,7 +1871,7 @@ function setupMouseControls() {
   // Touch: one finger orbit, two fingers zoom.
   let lastTouchDist = 0;
   vp.addEventListener('touchstart', e => {
-    if (!pointCloud) return;
+    if (!modelLoaded) return;
     if (e.touches.length === 1) {
       isDragging = true;
       dragButton = 0;
@@ -1556,7 +1886,7 @@ function setupMouseControls() {
   });
   vp.addEventListener('touchend', () => { isDragging = false; });
   vp.addEventListener('touchmove', e => {
-    if (!pointCloud) return;
+    if (!modelLoaded) return;
     e.preventDefault();
     if (e.touches.length === 1 && isDragging) {
       const dx = e.touches[0].clientX - lastMX;
@@ -1590,7 +1920,7 @@ function panCamera(dx, dy) {
 }
 
 function updateKeyboardMovement() {
-  if (!pointCloud || keysDown.size === 0) return;
+  if (!modelLoaded || keysDown.size === 0) return;
 
   // Scene scale is usually small, so the default movement is intentionally slow.
   // The SPEED slider multiplies this base movement; holding Shift keeps the original fast-move behavior.
